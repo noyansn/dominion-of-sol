@@ -24,6 +24,7 @@ export default defineConfig({
     __DOMINION_PROTOCOL_VERSION__: JSON.stringify('1.0.0'),
   },
   server: {
+    host: '0.0.0.0',
     port: 5173,
     strictPort: true,
   },
