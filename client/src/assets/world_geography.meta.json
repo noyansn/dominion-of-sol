@@ -1,0 +1,10 @@
+{
+  "width": 1024,
+  "height": 512,
+  "totalCells": 524288,
+  "landCells": 172033,
+  "waterCells": 352255,
+  "gridChecksum": "a1341bf4fb8be1cb778d3d1d766453e177230e4ffff4bed255da7d4d7263f7dc",
+  "triangleCount": 425571,
+  "generatedAt": "2026-08-26T22:01:07.754Z"
+}

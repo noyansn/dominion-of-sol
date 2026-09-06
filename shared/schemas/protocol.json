@@ -1,0 +1,214 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Dominion of Sol Population Strategy Protocol",
+  "description": "Version 1.0.0 transport contract. Runtime world is 1024x512 with one custom human faction and 100 AI factions; Population is the only player-facing resource.",
+  "version": "1.0.0",
+  "definitions": {
+    "PlayerJoin": {
+      "type": "object",
+      "required": ["type", "protocolVersion", "playerName", "token"],
+      "properties": {
+        "type": { "type": "string", "const": "player_join" },
+        "protocolVersion": { "type": "string" },
+        "playerName": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "token": { "type": "string" },
+        "nationName": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "factionColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "flagId": { "type": "string", "maxLength": 32 },
+        "flagDescriptor": { "$ref": "#/definitions/FlagDescriptor" },
+        "startingCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "doctrineOffense": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineDefense": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineExpansion": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineMaritime": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "clientTime": { "type": "integer" }
+      }
+    },
+    "FlagDescriptor": {
+      "type": "object",
+      "required": ["layout", "primaryColor", "secondaryColor", "accentColor", "emblem"],
+      "properties": {
+        "layout": { "type": "string", "enum": ["solid", "horizontalBicolor", "horizontalTricolor", "verticalBicolor", "verticalTricolor", "cross", "diagonal", "chevron"] },
+        "primaryColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "secondaryColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "accentColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "emblem": { "type": "string", "enum": ["none", "star", "circle", "sun", "crescent", "diamond", "shield", "eagle"] }
+      }
+    },
+    "FactionInfo": {
+      "type": "object",
+      "required": ["factionId", "displayName", "factionColor", "colorInt", "flagId", "capitalCell", "population", "populationCapacity", "populationGrowthPerSecond", "deployedPopulation", "totalLivingPopulation", "controlledAreaKm2", "effectiveControlledAreaKm2", "portsCount", "doctrineOffense", "doctrineDefense", "doctrineExpansion", "doctrineMaritime", "territoryCount", "isHuman", "isEliminated"],
+      "properties": {
+        "factionId": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "displayName": { "type": "string" },
+        "factionColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "colorInt": { "type": "integer" },
+        "flagId": { "type": "string" },
+        "flagDescriptor": { "anyOf": [{ "$ref": "#/definitions/FlagDescriptor" }, { "type": "null" }] },
+        "nationPresetId": { "type": "string" },
+        "homelandRegion": { "type": "string" },
+        "capitalCell": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "population": { "type": "number", "minimum": 0 },
+        "populationCapacity": { "type": "number", "minimum": 0 },
+        "populationGrowthPerSecond": { "type": "number", "minimum": 0 },
+        "deployedPopulation": { "type": "number", "minimum": 0 },
+        "totalLivingPopulation": { "type": "number", "minimum": 0 },
+        "controlledAreaKm2": { "type": "number", "minimum": 0 },
+        "effectiveControlledAreaKm2": { "type": "number", "minimum": 0 },
+        "portsCount": { "type": "integer", "minimum": 0 },
+        "doctrineOffense": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineDefense": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineExpansion": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "doctrineMaritime": { "type": "number", "minimum": -0.06, "maximum": 0.06 },
+        "territoryCount": { "type": "integer", "minimum": 0 },
+        "isHuman": { "type": "boolean" },
+        "isEliminated": { "type": "boolean" }
+      }
+    },
+    "FrontInfo": {
+      "type": "object",
+      "required": ["frontId", "factionA", "factionB", "deployedPopulationA", "deployedPopulationB", "pressure", "centroidX", "centroidY", "normalX", "normalY", "isCombatActive", "attackerFaction", "attackMode", "startedTick", "capturedCells", "terminationReason", "sourceCellIndex", "targetCellIndex", "localDefensePopulation", "defenseFocusPopulation", "casualties", "operationKind"],
+      "properties": {
+        "frontId": { "type": "integer", "minimum": 1 },
+        "factionA": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "factionB": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "deployedPopulationA": { "type": "number", "minimum": 0 },
+        "deployedPopulationB": { "type": "number", "minimum": 0 },
+        "pressure": { "type": "number", "minimum": -1, "maximum": 1 },
+        "centroidX": { "type": "number" },
+        "centroidY": { "type": "number" },
+        "normalX": { "type": "number" },
+        "normalY": { "type": "number" },
+        "isCombatActive": { "type": "boolean" },
+        "attackerFaction": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "attackMode": { "type": "string" },
+        "startedTick": { "type": "integer", "minimum": 0 },
+        "capturedCells": { "type": "integer", "minimum": 0 },
+        "terminationReason": { "type": "string" },
+        "sourceCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "targetCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "intentTargetCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "localDefensePopulation": { "type": "number", "minimum": 0 },
+        "defenseFocusPopulation": { "type": "number", "minimum": 0 },
+        "sharedLocalForcePopulation": { "type": "number", "minimum": 0 },
+        "casualties": { "type": "number", "minimum": 0 },
+        "operationKind": { "type": "string" },
+        "survivorsReturned": { "type": "boolean" }
+      }
+    },
+    "AllianceProposalInfo": {
+      "type": "object",
+      "required": ["proposalId", "proposer", "target"],
+      "properties": {
+        "proposalId": { "type": "integer", "minimum": 1 },
+        "proposer": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "target": { "type": "integer", "minimum": 1, "maximum": 101 }
+      }
+    },
+    "PlayerLeave": {
+      "type": "object",
+      "required": ["type", "playerId", "clientTime"],
+      "properties": {
+        "type": { "type": "string", "const": "player_leave" },
+        "playerId": { "type": "integer" },
+        "clientTime": { "type": "integer" }
+      }
+    },
+    "CameraRegion": {
+      "type": "object",
+      "required": ["type", "minX", "minY", "maxX", "maxY", "zoomLevel"],
+      "properties": {
+        "type": { "type": "string", "const": "camera_region" },
+        "minX": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "minY": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "maxX": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "maxY": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "zoomLevel": { "type": "number", "minimum": 0.1, "maximum": 5.0 }
+      }
+    },
+    "AttackCommand": {
+      "type": "object",
+      "required": ["type", "sourceCellIndex", "targetCellIndex", "attackType", "commitPercent"],
+      "properties": {
+        "type": { "type": "string", "const": "attack_command" },
+        "sequence": { "type": "integer" },
+        "sourceCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "targetCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "requestedTargetCellIndex": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "attackType": { "type": "string", "const": "LAND_OFFENSIVE" },
+        "frontId": { "type": ["integer", "null"] },
+        "commitPercent": { "type": "number", "minimum": 0.05, "maximum": 1.0 },
+        "clientTime": { "type": "integer" }
+      }
+    },
+    "CellState": {
+      "type": "object",
+      "required": ["index", "ownerId", "terrain", "flags"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "ownerId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "terrain": { "type": "integer", "minimum": 0, "maximum": 15 },
+        "flags": { "type": "integer", "minimum": 0, "maximum": 255 }
+      }
+    },
+    "WorldSnapshot": {
+      "type": "object",
+      "required": ["type", "tick", "sequence", "width", "height", "totalCells", "yourFactionId", "factions", "fronts", "matchState", "strategicSites", "ports", "alliances", "cells"],
+      "properties": {
+        "type": { "type": "string", "const": "world_snapshot" },
+        "tick": { "type": "integer" },
+        "sequence": { "type": "integer" },
+        "width": { "type": "integer", "const": 1024 },
+        "height": { "type": "integer", "const": 512 },
+        "totalCells": { "type": "integer", "const": 524288 },
+        "yourFactionId": { "type": "integer", "minimum": 1, "maximum": 101 },
+        "factions": { "type": "array", "minItems": 101, "maxItems": 101, "items": { "$ref": "#/definitions/FactionInfo" } },
+        "fronts": { "type": "array", "items": { "$ref": "#/definitions/FrontInfo" } },
+        "matchState": { "type": "object" },
+        "strategicSites": { "type": "array" },
+        "ports": { "type": "array" },
+        "alliances": { "type": "array" },
+        "pendingAlliances": { "type": "array", "items": { "$ref": "#/definitions/AllianceProposalInfo" } },
+        "cells": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/CellState" }
+        }
+      }
+    },
+    "CellDelta": {
+      "type": "object",
+      "required": ["index", "ownerId", "flags"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 524287 },
+        "ownerId": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "flags": { "type": "integer", "minimum": 0, "maximum": 255 }
+      }
+    },
+    "CellDeltaBatch": {
+      "type": "object",
+      "required": ["type", "tick", "sequence", "deltas"],
+      "properties": {
+        "type": { "type": "string", "const": "cell_delta_batch" },
+        "tick": { "type": "integer" },
+        "sequence": { "type": "integer" },
+        "deltas": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/CellDelta" }
+        }
+      }
+    },
+    "ServerMetrics": {
+      "type": "object",
+      "required": ["type", "tick", "tickTimeMs", "activePlayers", "botCount", "deltasCount", "ramUsageMb"],
+      "properties": {
+        "type": { "type": "string", "const": "server_metrics" },
+        "tick": { "type": "integer" },
+        "tickTimeMs": { "type": "number" },
+        "activePlayers": { "type": "integer" },
+        "botCount": { "type": "integer" },
+        "deltasCount": { "type": "integer" },
+        "ramUsageMb": { "type": "number" }
+      }
+    }
+  }
+}

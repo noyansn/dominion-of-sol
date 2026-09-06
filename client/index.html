@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#07111c" />
+  <title>Dominion of Sol — Command Atlas</title>
+</head>
+<body data-ui-state="IDLE" data-operation-visible="false">
+  <div id="app-container" role="application" aria-label="Dominion world map"></div>
+
+  <div id="ui-shell">
+    <header id="player-hud" class="command-bar command-bar--player" aria-label="Player command status">
+      <section class="command-module player-module">
+        <div id="player-flag-badge" class="faction-insignia" aria-label="Player faction insignia">SOL</div>
+        <div class="command-identity">
+          <span class="command-eyebrow">SOVEREIGN COMMAND</span>
+          <strong id="player-faction-name">Dominion of Sol</strong>
+        </div>
+        <span class="command-rule" aria-hidden="true"></span>
+        <div class="resource-module resource-module--population" title="Uncommitted Population. Deployed people remain living and return when operations end.">
+          <span class="resource-label">POPULATION</span>
+          <strong id="player-population">—</strong>
+          <span class="resource-bar" aria-hidden="true"><i id="player-population-bar"></i></span>
+        </div>
+        <div class="resource-module player-extra" title="Server-authoritative reinforcement rate">
+          <span class="resource-label">GROWTH</span>
+          <strong id="player-growth">+0.0/s</strong>
+        </div>
+        <div class="resource-module player-extra">
+          <span class="resource-label">LAND AREA</span>
+          <strong id="player-territory-count">0</strong>
+        </div>
+        <button id="btn-create-nation" type="button" style="display: none !important;" aria-hidden="true"></button>
+      </section>
+    </header>
+
+    <section id="match-hud" class="command-bar command-bar--world" aria-label="World command controls">
+      <div class="command-module world-module">
+        <div class="world-objective">
+          <span id="hud-connection-dot" class="connection-indicator" aria-hidden="true"></span>
+          <div>
+            <span class="command-eyebrow">WORLD DOMINION</span>
+            <strong id="match-phase">STANDBY</strong>
+          </div>
+        </div>
+        <span class="command-rule" aria-hidden="true"></span>
+        <div class="world-population" id="hud-nations-pill" role="button" tabindex="0" title="Open Sovereign Nations Atlas Drawer (Click to view all 101 nations)">
+          <span class="resource-label">NATIONS</span>
+          <strong id="hud-faction-count">0</strong>
+        </div>
+        <div class="tactical-selector" aria-label="Map projection">
+          <button id="btn-mode-flat" class="active" type="button" aria-label="Use flat map projection">FLAT</button>
+          <button id="btn-mode-globe" type="button" aria-label="Use globe projection">GLOBE</button>
+        </div>
+        <div class="tactical-selector" aria-label="Map display mode">
+          <button id="btn-map-political" class="active" type="button" aria-label="Show political map">POL</button>
+          <button id="btn-map-terrain" type="button" aria-label="Show terrain map">TER</button>
+        </div>
+        <button id="btn-hud-reaction" class="tactical-btn-reaction" type="button" aria-label="Open reactions and emojis" title="Reactions & Emojis (E)">
+          <span class="btn-reaction-icon">✨</span>
+          <span class="btn-reaction-label">EMOJI</span>
+          <kbd class="btn-reaction-kbd">E</kbd>
+        </button>
+        <button id="btn-match-exit" class="tactical-btn-exit" type="button" aria-label="Leave match" title="Leave Match (ESC)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </button>
+        <button id="btn-info" type="button" style="display: none !important;" aria-hidden="true"></button>
+        <span id="map-mode-label" class="sr-only">FLAT MAP</span>
+      </div>
+    </section>
+
+    <aside id="selection-panel" class="context-console" aria-live="polite" aria-label="Selected territory command console">
+      <div class="context-console__heading">
+        <div>
+          <span class="command-eyebrow">TACTICAL SELECTION</span>
+          <strong id="selection-state">AWAITING ORDERS</strong>
+        </div>
+        <button id="btn-clear-selection" class="console-dismiss" type="button" aria-label="Clear selected territories">CLEAR</button>
+      </div>
+      <div class="selection-route">
+        <div class="selection-party">
+          <span class="resource-label">ORIGIN</span>
+          <strong id="selection-source-name">—</strong>
+          <small id="selection-source-meta">Your side</small>
+        </div>
+        <span class="route-vector" aria-hidden="true"></span>
+        <div class="selection-party">
+          <span class="resource-label">TARGET</span>
+          <strong id="selection-target-name">—</strong>
+          <small id="selection-target-meta">Select land to issue a command</small>
+        </div>
+      </div>
+      <div class="context-console__footer">
+        <span id="selection-relation" class="relationship-marker">NO CONTACT</span>
+        <span id="selection-hint" class="selection-hint">Select land to issue a command.</span>
+      </div>
+      <div id="selection-faction-facts" class="selection-facts">No faction intelligence available.</div>
+      <button id="btn-expand-frontier" class="command-button command-button--expand" type="button" style="display:none">
+        <span>EXPAND FRONTIER</span><small>NEUTRAL OPERATION</small>
+      </button>
+      <button id="btn-defense-focus" class="command-button command-button--defense" type="button" style="display:none">
+        <span>DEFEND FRONTIER</span><small>DEPLOY POPULATION</small>
+      </button>
+      <button id="btn-build-port" class="command-button command-button--port" type="button" style="display:none">
+        <span>BUILD PORT</span><small>PERMANENT POPULATION COST</small>
+      </button>
+      <button id="btn-amphibious-attack" class="command-button command-button--amphibious" type="button" style="display:none">
+        <span>AMPHIBIOUS OPERATION</span><small>PORT TO COASTAL TARGET</small>
+      </button>
+      <button id="btn-offer-alliance" class="command-button command-button--alliance" type="button" style="display:none">
+        <span>OFFER ALLIANCE</span><small>NON-HOSTILE NATION</small>
+      </button>
+    </aside>
+
+    <section id="alliance-proposal" class="context-console alliance-proposal" aria-live="polite" aria-label="Alliance proposal" hidden>
+      <span class="command-eyebrow">DIPLOMATIC PROPOSAL</span>
+      <strong id="alliance-proposal-name">ALLIANCE OFFER</strong>
+      <small id="alliance-proposal-meta">A nation requests a pact.</small>
+      <div class="alliance-proposal__actions">
+        <button id="btn-alliance-accept" class="command-button command-button--alliance" type="button">ACCEPT</button>
+        <button id="btn-alliance-reject" class="command-button command-button--halt" type="button">REJECT</button>
+      </div>
+    </section>
+
+    <!-- Map-Anchored Country Dossier Plaque (Speech-Bubble Design) -->
+    <article id="country-dossier" class="country-dossier" aria-live="polite" aria-label="Country Dossier" hidden>
+      <div id="dossier-tail" class="dossier-tail" aria-hidden="true"></div>
+      <div class="dossier-header">
+        <div id="dossier-crest" class="dossier-crest" aria-hidden="true">
+          <svg class="dossier-shield-svg" viewBox="0 0 36 44" width="36" height="44">
+            <path id="shield-bg" d="M 4 4 Q 18 1 32 4 Q 33 24 18 41 Q 3 24 4 4 Z" fill="#1e3a8a" class="shield-bg" />
+            <path id="shield-border" d="M 4 4 Q 18 1 32 4 Q 33 24 18 41 Q 3 24 4 4 Z" fill="none" stroke="#dfbc73" stroke-width="1.6" class="shield-border" />
+            <!-- Golden Compass Star Emblem -->
+            <g id="shield-emblem" class="shield-emblem">
+              <circle cx="18" cy="21" r="8" fill="none" stroke="#dfbc73" stroke-width="0.8" opacity="0.6"/>
+              <path d="M 18 10 L 20.5 18.5 L 29 21 L 20.5 23.5 L 18 32 L 15.5 23.5 L 7 21 L 15.5 18.5 Z" fill="#dfbc73"/>
+              <circle cx="18" cy="21" r="2.2" fill="#ffffff"/>
+            </g>
+          </svg>
+        </div>
+        <div class="dossier-title-block">
+          <strong id="dossier-name" class="dossier-name">DOMINION OF SOL</strong>
+          <span id="dossier-subtitle" class="dossier-subtitle">ACTIVE NATION</span>
+        </div>
+        <button type="button" class="dossier-close-btn" id="dossier-close" aria-label="Close dossier">×</button>
+      </div>
+      <div class="dossier-divider" aria-hidden="true"></div>
+      <div class="dossier-grid">
+        <div class="dossier-row">
+          <span class="dossier-lbl">Population</span>
+          <div class="dossier-val-group">
+            <strong id="dossier-population">90.000</strong>
+            <span id="dossier-growth-inline" class="dossier-trend">+18.0/s</span>
+          </div>
+        </div>
+        <div class="dossier-row">
+          <span class="dossier-lbl">Growth</span>
+          <strong id="dossier-growth" class="dossier-trend">+18.0/s</strong>
+        </div>
+        <div class="dossier-row">
+          <span class="dossier-lbl">Land Area</span>
+          <strong id="dossier-territory">484.3M km²</strong>
+        </div>
+        <div class="dossier-row">
+          <span class="dossier-lbl">Status</span>
+          <strong id="dossier-status" class="dossier-status">INDEPENDENT POWER</strong>
+        </div>
+      </div>
+      <div class="dossier-actions">
+        <button id="btn-dossier-inspect-civ" class="dossier-inspect-btn" type="button">
+          <span>INSPECT CIVILIZATION</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+      <span id="dossier-flag" hidden></span>
+      <span id="dossier-capital" hidden></span>
+      <span id="dossier-diplomacy" hidden></span>
+    </article>
+
+    <!-- =====================================================================
+         BOTTOM-CENTER COMMAND INTERFACE
+         Art-Directed Physical Mechanism: SWORD & SCABBARD COMMITMENT
+         ===================================================================== -->
+    <section id="attack-panel" class="operation-console" data-variant="sword-scabbard" aria-live="polite" aria-label="Commitment Mechanism">
+      <!-- ACTIVE WAR ENGAGEMENT COMMAND DECK (Appears on Main Screen During Combat/War) -->
+      <div id="combat-engagement-deck" class="combat-engagement-deck" style="display: none;">
+        <div class="combat-deck-status">
+          <div class="combat-status-badge">
+            <span class="combat-pulse-dot" aria-hidden="true"></span>
+            <span id="operation-eyebrow" class="combat-status-eyebrow">ACTIVE FRONT</span>
+            <span class="combat-status-sep">·</span>
+            <strong id="operation-title" class="combat-status-title">WAR ENGAGED</strong>
+          </div>
+          <div class="combat-versus-row">
+            <span id="attack-own-flag" class="combat-flag combat-flag--own">SOL</span>
+            <span class="combat-vs-symbol" aria-hidden="true">⚔</span>
+            <span id="attack-enemy-flag" class="combat-flag combat-flag--enemy">???</span>
+            <strong id="attack-enemy-name" class="combat-enemy-name">Hostile Nation</strong>
+          </div>
+        </div>
+        <div class="combat-deck-actions">
+          <button id="btn-launch-attack" class="combat-btn combat-btn--launch" type="button">
+            <span class="combat-btn-icon">⚔</span>
+            <span>LAUNCH ATTACK</span>
+          </button>
+          <button id="btn-reinforce-front" class="combat-btn combat-btn--reinforce" type="button">
+            <span class="combat-btn-icon">▲</span>
+            <span>REINFORCE</span>
+          </button>
+          <button id="btn-halt-attack" class="combat-btn combat-btn--halt" type="button">
+            <span class="combat-btn-icon">■</span>
+            <span>HALT</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="scabbard-sword-assembly" id="scabbard-sword-root">
+
+        <!-- 1. LEFT: COMMITMENT READOUT & LIVE INDICATOR -->
+        <div class="sword-status-block">
+          <div class="sword-ready-badge" id="sword-ready-badge">
+            <span class="sword-ready-dot" aria-hidden="true"></span>
+            <span class="sword-ready-text" id="rail-context-verb">READY</span>
+          </div>
+          <div class="sword-commit-group">
+            <span class="sword-commit-label">COMMIT</span>
+            <strong class="sword-commit-pct" id="attack-percent">50%</strong>
+            <span class="sword-commit-force" id="attack-population-readout">45K committed</span>
+          </div>
+        </div>
+
+        <!-- 2. CENTER: PHYSICAL SWORD & SCABBARD INSTRUMENT (HERO VECTOR ART) -->
+        <div class="sword-instrument-module">
+          <svg class="sword-scabbard-svg" id="sword-scabbard-svg" viewBox="0 0 580 54" width="580" height="54" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <!-- Scabbard body gradient (lacquered black-petrol composite) -->
+              <linearGradient id="scabbard-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#18232d" />
+                <stop offset="18%" stop-color="#0f1720" />
+                <stop offset="55%" stop-color="#070b0f" />
+                <stop offset="90%" stop-color="#030508" />
+                <stop offset="100%" stop-color="#0a1017" />
+              </linearGradient>
+
+              <!-- Champagne-brass fitting gradient (throat & chape) -->
+              <linearGradient id="brass-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#f4dc9e" />
+                <stop offset="25%" stop-color="#cba65f" />
+                <stop offset="65%" stop-color="#7d6129" />
+                <stop offset="90%" stop-color="#54411b" />
+                <stop offset="100%" stop-color="#af8d45" />
+              </linearGradient>
+
+              <!-- Blade steel gradient (cold forged precision silver/titanium) -->
+              <linearGradient id="blade-steel-upper" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="25%" stop-color="#e2edf6" />
+                <stop offset="70%" stop-color="#a4b8c7" />
+                <stop offset="100%" stop-color="#728899" />
+              </linearGradient>
+              <linearGradient id="blade-steel-lower" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#506575" />
+                <stop offset="35%" stop-color="#32424e" />
+                <stop offset="85%" stop-color="#8ba1b2" />
+                <stop offset="100%" stop-color="#ffffff" />
+              </linearGradient>
+
+              <!-- Dynamic specular pass overlay gradient (travels during draw) -->
+              <linearGradient id="blade-specular-pass" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#ffffff" stop-opacity="0" />
+                <stop offset="45%" stop-color="#ffffff" stop-opacity="0.3" />
+                <stop offset="50%" stop-color="#ffffff" stop-opacity="0.85" />
+                <stop offset="55%" stop-color="#ffffff" stop-opacity="0.3" />
+                <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+              </linearGradient>
+
+              <!-- Grip wrap gradient -->
+              <linearGradient id="grip-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#2a3844" />
+                <stop offset="30%" stop-color="#141c24" />
+                <stop offset="75%" stop-color="#0a0f14" />
+                <stop offset="100%" stop-color="#1a242e" />
+              </linearGradient>
+
+              <!-- Hot friction spark glow & flash filters -->
+              <filter id="spark-glow" x="-100%" y="-100%" width="300%" height="300%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur1" />
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3.5" result="blur2" />
+                <feMerge>
+                  <feMergeNode in="blur2" />
+                  <feMergeNode in="blur1" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+              <radialGradient id="spark-flash-grad" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#ffffff" stop-opacity="1" />
+                <stop offset="35%" stop-color="#ffea70" stop-opacity="0.95" />
+                <stop offset="70%" stop-color="#ff8c00" stop-opacity="0.6" />
+                <stop offset="100%" stop-color="#ff4500" stop-opacity="0" />
+              </radialGradient>
+              
+              <!-- Authoritative Scabbard Mouth Occlusion Boundary (X >= 250 emerged into open air, X < 250 sheathed inside) -->
+              <clipPath id="scabbard-drawn-clip" clipPathUnits="userSpaceOnUse">
+                <rect x="250" y="-100" width="800" height="300" />
+              </clipPath>
+            </defs>
+
+            <!-- 1. Ambient contact shadow below scabbard -->
+            <ellipse cx="132" cy="38" rx="120" ry="5" fill="#000000" opacity="0.65" />
+
+            <!-- 2. SUBTLE "DRAW FIELD" (Calibrated mechanical travel area to the right of throat) -->
+            <g class="sword-draw-field" id="sword-draw-field">
+              <!-- Directional machining reference line from throat -->
+              <line x1="252" y1="27" x2="486" y2="27" stroke="rgba(255,255,255,0.04)" stroke-width="1" />
+              <!-- Thin horizontal calibration baseline -->
+              <line x1="254" y1="41" x2="486" y2="41" stroke="rgba(255,255,255,0.12)" stroke-width="0.75" stroke-dasharray="2 3" />
+
+              <!-- Calibration detent ticks and labels -->
+              <!-- 25% Detent (Guard at X = 308) -->
+              <g class="svg-detent" data-commit="25" transform="translate(308, 0)">
+                <line x1="0" y1="36" x2="0" y2="41" stroke="#475569" stroke-width="1" />
+                <text x="0" y="50" font-size="8" font-family="monospace" fill="#64748b" text-anchor="middle">25</text>
+              </g>
+
+              <!-- 50% Detent (Tactical Equilibrium, Guard at X = 366) -->
+              <g class="svg-detent" data-commit="50" transform="translate(366, 0)">
+                <line x1="0" y1="34" x2="0" y2="42" stroke="#dfbc73" stroke-width="1.2" opacity="0.75" />
+                <text x="0" y="50" font-size="8" font-family="monospace" fill="#dfbc73" font-weight="700" text-anchor="middle">50</text>
+              </g>
+
+              <!-- 75% Detent (Heavy Commitment, Guard at X = 424) -->
+              <g class="svg-detent" data-commit="75" transform="translate(424, 0)">
+                <line x1="0" y1="36" x2="0" y2="41" stroke="#475569" stroke-width="1" />
+                <text x="0" y="50" font-size="8" font-family="monospace" fill="#64748b" text-anchor="middle">75</text>
+              </g>
+
+              <!-- 100% Detent (Full Irrevocable Draw, Guard at X = 482) -->
+              <g class="svg-detent" data-commit="100" transform="translate(482, 0)">
+                <line x1="0" y1="34" x2="0" y2="43" stroke="#f4dc9e" stroke-width="1.6" />
+                <text x="0" y="50" font-size="8" font-family="monospace" fill="#f4dc9e" font-weight="700" text-anchor="middle">100</text>
+              </g>
+
+              <!-- Current Position Moving Index (Travels continuously with commitment) -->
+              <g id="sword-position-index" transform="translate(366, 0)">
+                <polygon points="0,38 -2.5,42 2.5,42" fill="#dfbc73" stroke="#f4dc9e" stroke-width="0.5" />
+              </g>
+            </g>
+
+            <!-- 3. THE MOVING SWORD ASSEMBLY (Layered underneath scabbard, naturally emerges rightward) -->
+            <!-- A. Fixed Occlusion Window at root X=250 for Blade Body -->
+            <g clip-path="url(#scabbard-drawn-clip)">
+              <g id="sword-blade-assembly" transform="translate(366, 0)">
+                <g id="sword-blade-group">
+                  <!-- Blade drop shadow into open air -->
+                  <path d="M -216 27 C -200 29.5, -180 32, -160 32.2 L 0 33 L 0 36 L -160 35.2 C -180 35, -200 31, -216 27 Z" fill="#000000" opacity="0.35" />
+
+                  <!-- Upper Bevel (Catch-light facet) -->
+                  <path d="M -216 27 C -204 24.8, -192 22.4, -178 22.25 L 0 21.25 L 0 27 L -216 27 Z" fill="url(#blade-steel-upper)" />
+
+                  <!-- Lower Bevel (Shadowed cutting facet) -->
+                  <path d="M -216 27 C -204 29.2, -192 31.6, -178 31.75 L 0 32.75 L 0 27 L -216 27 Z" fill="url(#blade-steel-lower)" />
+
+                  <!-- Dynamic specular pass highlight (shifts with velocity) -->
+                  <rect id="blade-specular-rect" x="-216" y="21.25" width="216" height="11.5" fill="url(#blade-specular-pass)" opacity="0" />
+
+                  <!-- Continuous spine catch-light running to the needle tip -->
+                  <path id="blade-spine-catchlight" d="M -215 27 C -203 24.9, -191 22.5, -178 22.35 L 0 21.35" stroke="#ffffff" stroke-width="0.9" fill="none" opacity="0.95" />
+
+                  <!-- Central Fuller / Blood Groove (166px long, terminates cleanly before tip taper) -->
+                  <line id="blade-fuller-base" x1="-172" y1="27" x2="-4" y2="27" stroke="#121a22" stroke-width="2.2" stroke-linecap="round" />
+                  <line id="blade-fuller-highlight" x1="-172" y1="27.8" x2="-4" y2="27.8" stroke="rgba(255,255,255,0.75)" stroke-width="0.75" stroke-linecap="round" />
+
+                  <!-- Razor cutting edge along lower rim -->
+                  <path d="M -215 27 C -203 29.1, -191 31.5, -178 31.65 L 0 32.65" stroke="#ffffff" stroke-width="0.8" fill="none" opacity="0.9" />
+                </g>
+              </g>
+            </g>
+
+            <!-- B. HILT (Guard, Grip, Pommel) -->
+            <g id="drawn-sword-assembly" transform="translate(366, 0)">
+              <g id="sword-hilt" class="sword-hilt-draggable" role="slider" tabindex="0"
+                 aria-valuemin="5" aria-valuemax="100" aria-valuenow="50"
+                 aria-label="Commitment blade hilt. Pull right to draw sword from scabbard.">
+                
+                <!-- Crossguard (Restrained ceremonial military ferrule) -->
+                <path d="M -2 15.5 C 0 15.5, 3 16.5, 4 18.5 L 5 35.5 C 4 37.5, 0 38.5, -2 38.5 L -3 38.5 L -3 15.5 Z" fill="url(#brass-grad)" stroke="#ffffff" stroke-width="0.5" stroke-opacity="0.5" />
+                <circle cx="2" cy="27" r="1.5" fill="#32240e" />
+
+                <!-- Grip / Handle (Ergonomic contoured grip with knurled brass rings) -->
+                <rect x="5" y="20.5" width="40" height="13" rx="2" fill="url(#grip-grad)" stroke="rgba(255,255,255,0.15)" stroke-width="0.6" />
+                <line x1="11" y1="21" x2="11" y2="33" stroke="#dfbc73" stroke-width="1.2" />
+                <line x1="17" y1="20.7" x2="17" y2="33.3" stroke="#dfbc73" stroke-width="1.2" />
+                <line x1="23" y1="20.5" x2="23" y2="33.5" stroke="#f4dc9e" stroke-width="1.5" />
+                <line x1="29" y1="20.5" x2="29" y2="33.5" stroke="#f4dc9e" stroke-width="1.5" />
+                <line x1="35" y1="20.7" x2="35" y2="33.3" stroke="#dfbc73" stroke-width="1.2" />
+                <line x1="41" y1="21" x2="41" y2="33" stroke="#dfbc73" stroke-width="1.2" />
+
+                <!-- Pommel (Counterweight cap) -->
+                <path d="M 45 18.5 C 49 18.5, 55 21.5, 55 27 C 55 32.5, 49 35.5, 45 35.5 Z" fill="url(#brass-grad)" stroke="rgba(255,255,255,0.4)" stroke-width="0.6" />
+                <circle id="pommel-gem" cx="49" cy="27" r="2" fill="#2d220f" stroke="#f4dc9e" stroke-width="0.6" />
+
+                <!-- Invisible large touch/drag hit target for effortless grab -->
+                <rect x="-4" y="4" width="64" height="46" fill="transparent" />
+              </g>
+            </g>
+
+            <!-- 4. FIXED SCABBARD BODY (Length 236px, rendered ON TOP of blade, naturally occluding it!) -->
+            <g class="scabbard-group" id="fixed-scabbard">
+              <!-- Closed left end (Chape fitting) -->
+              <path d="M 14 27 C 14 23.5, 19 20, 26 19 L 40 18.75 L 40 35.25 L 26 35 C 19 34, 14 30.5, 14 27 Z" fill="url(#scabbard-grad)" />
+              <path d="M 14 27 C 14 23.5, 18 20.5, 26 19.5 L 32 19 L 32 35 L 26 34.5 C 18 33.5, 14 30.5, 14 27 Z" fill="url(#brass-grad)" />
+              <circle cx="23" cy="27" r="1.5" fill="#2d220f" stroke="#e2c47e" stroke-width="0.5" />
+
+              <!-- Scabbard main leather body (extends to X = 240) -->
+              <path d="M 40 18.75 L 240 18.75 L 240 35.25 L 40 35.25 Z" fill="url(#scabbard-grad)" />
+              <line x1="40" y1="19.25" x2="240" y2="19.25" stroke="rgba(255,255,255,0.18)" stroke-width="1" />
+              <line x1="40" y1="27" x2="240" y2="27" stroke="rgba(255,255,255,0.06)" stroke-width="0.75" />
+              <line x1="40" y1="34.75" x2="240" y2="34.75" stroke="rgba(0,0,0,0.85)" stroke-width="1" />
+
+              <!-- Scabbard mouth / throat fitting (Locket, X = 240 to 250) -->
+              <g id="scabbard-throat-group">
+                <path d="M 240 15.5 L 250 15.5 L 250 38.5 L 240 38.5 Z" fill="url(#brass-grad)" />
+                <line x1="240" y1="16" x2="240" y2="38" stroke="#ffffff" stroke-width="0.8" opacity="0.4" />
+                <!-- Throat mouth opening slot -->
+                <rect x="247" y="20" width="3" height="14" fill="#020406" />
+                <!-- Specular throat front lip (overlaps emerging blade) -->
+                <line x1="250" y1="15.5" x2="250" y2="38.5" stroke="#ffffff" stroke-width="1.2" opacity="0.8" />
+              </g>
+            </g>
+
+            <!-- 5. THROAT FRICTION SPARKS (Micro-particles emitted at scabbard mouth during drawing/sheathing) -->
+            <g id="throat-friction-sparks" transform="translate(250, 27)" pointer-events="none">
+              <circle id="throat-flash-disc" cx="0" cy="0" r="16" fill="url(#spark-flash-grad)" opacity="0"></circle>
+              <g id="spark-particles-group" filter="url(#spark-glow)"></g>
+            </g>
+
+          </svg>
+        </div>
+
+        <!-- 3. RIGHT: RESTRAINED DOCTRINE SELECTOR (TACTILE LATCH WITH CONTEXTUAL DESCRIPTORS) -->
+        <div class="sword-doctrine-block">
+          <div class="doctrine-toggle-capsule" role="group" aria-label="Operation doctrine">
+            <button id="btn-dock-mode-focus" class="doctrine-btn active" data-mode="FOCUS" type="button" aria-label="Focus doctrine: Direct concentrated strike">
+              <span class="doctrine-label">FOCUS</span>
+              <span class="doctrine-desc">DIRECT STRIKE</span>
+            </button>
+            <button id="btn-dock-mode-frontier" class="doctrine-btn" data-mode="FRONTIER" type="button" aria-label="Frontier doctrine: Broad border expansion">
+              <span class="doctrine-label">FRONTIER</span>
+              <span class="doctrine-desc">BORDER EXPANSION</span>
+            </button>
+            <span class="doctrine-sliding-indicator" id="doctrine-indicator" aria-hidden="true"></span>
+          </div>
+        </div>
+
+        <!-- 4. FAR RIGHT: INTEGRATED EXECUTE / COMMIT TRIGGER -->
+        <div class="sword-execute-block">
+          <button id="btn-blade-execute" class="sword-execute-btn" type="button" aria-label="Commit and execute frontline operation">
+            <span class="execute-icon">⚔</span>
+            <span class="execute-label">COMMIT</span>
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Preserved hidden elements for legacy automated test contracts and accessibility -->
+      <input type="range" id="attack-commitment" min="5" max="100" value="50" step="1" hidden aria-hidden="true" />
+      <div id="attack-legal-reason" hidden></div>
+      <select id="operation-selector" hidden></select>
+    </section>
+
+    <nav id="command-rail" class="map-command-rail" aria-label="Map navigation" style="display: none !important;" aria-hidden="true">
+      <span class="command-eyebrow">ATLAS</span>
+      <button id="btn-center-map" type="button">CENTER</button>
+      <button id="btn-rail-flat" class="active" type="button">FLAT</button>
+      <button id="btn-rail-globe" type="button">GLOBE</button>
+    </nav>
+
+    <div id="mobile-controls" aria-label="Mobile quick controls" style="display: none !important;" aria-hidden="true">
+      <button id="mobile-command-toggle" class="mobile-command" type="button">COMMAND</button>
+      <div class="mobile-command-group">
+        <button id="btn-mobile-center" class="mobile-command" type="button">CENTER</button>
+        <button id="btn-mobile-info" type="button" style="display: none !important;" aria-hidden="true"></button>
+        <button id="btn-mobile-globe-quick" class="mobile-command" type="button">GLOBE</button>
+      </div>
+    </div>
+
+    <section id="mobile-sheet" class="mobile-command-sheet" data-open="false" aria-hidden="true" aria-label="Mobile command deck">
+      <div class="sheet-handle" aria-hidden="true"></div>
+      <div class="mobile-sheet__heading">
+        <div><span class="command-eyebrow">COMMAND DECK</span><strong>MAP &amp; DOCTRINE</strong></div>
+        <button id="mobile-sheet-close" class="console-dismiss" type="button" aria-label="Close command deck">CLOSE</button>
+      </div>
+      <div class="mobile-sheet__section">
+        <span class="resource-label">RESOURCE</span>
+        <div class="mobile-sheet__note">Every order deploys real Population from the same finite pool.</div>
+      </div>
+      <div class="mobile-sheet__section">
+        <span class="resource-label">PROJECTION</span>
+        <div class="mobile-segment-grid">
+          <button id="btn-mobile-flat" type="button">FLAT MAP</button>
+          <button id="btn-mobile-globe" type="button">GLOBE VIEW</button>
+        </div>
+      </div>
+      <div class="mobile-sheet__section">
+        <span class="resource-label">DISPLAY</span>
+        <div class="mobile-segment-grid">
+          <button id="btn-mobile-map-political" class="active" type="button">POLITICAL</button>
+          <button id="btn-mobile-map-terrain" type="button">TERRAIN</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="ui-toast" role="status" aria-live="polite"></div>
+    <p id="new-player-hint" class="guided-order" role="status">Select land to issue a command.</p>
+
+    <section id="info-panel" class="command-overlay" data-open="false" aria-hidden="true" aria-label="Dominion field manual">
+      <div class="overlay-scrim"></div>
+      <article class="field-manual" role="dialog" aria-modal="false" aria-labelledby="info-title">
+        <header class="overlay-heading">
+          <div><span class="command-eyebrow">DOMINION INTELLIGENCE</span><h2 id="info-title">Field manual</h2></div>
+          <button id="info-close" class="console-dismiss" type="button" aria-label="Close field manual">CLOSE</button>
+        </header>
+        <p class="manual-lead">Claim neutral land, establish a shared front, then issue operations from the command console. The map remains authoritative; every result is confirmed by the server.</p>
+        <div class="manual-grid">
+          <article><strong>OBJECTIVE</strong><span>Secure world dominion through the final surviving faction.</span></article>
+          <article><strong>POPULATION</strong><span>The main number is the uncommitted pool. Deployed living people remain part of your nation.</span></article>
+          <article><strong>LAND</strong><span>Controlled surface area builds capacity gradually; growth slows near carrying capacity.</span></article>
+          <article><strong>OFFENSIVE</strong><span>Select an exact shared border point and deploy Population. Multiple independent fronts are legal.</span></article>
+          <article><strong>DEFENSE</strong><span>Pre-position real Population at a frontier when you need to hold it.</span></article>
+          <article><strong>EXPANSION</strong><span>Neutral land is claimable only from a legal adjacent frontier and costs Population.</span></article>
+          <article><strong>ATLAS</strong><span>Switch projection or map display without recreating the world renderer.</span></article>
+        </div>
+      </article>
+    </section>
+
+    <section id="match-result" class="command-overlay" data-open="false" aria-hidden="true" aria-label="Match result">
+      <div class="overlay-scrim"></div>
+      <article class="result-console" role="dialog" aria-modal="true" aria-labelledby="result-winner">
+        <span class="command-eyebrow">WORLD DOMINION RESOLVED</span>
+        <h2 id="result-winner">Dominion of Sol</h2>
+        <p id="result-outcome">Dominion secured.</p>
+        <p id="result-land" class="result-detail">0 authoritative land cells</p>
+        <button id="btn-result-observe" class="command-button command-button--observe" type="button">CONTINUE OBSERVING</button>
+      </article>
+    </section>
+
+    <section id="flag-picker" class="command-overlay identity-overlay" style="display:none" aria-label="Faction identity selection">
+      <div class="overlay-scrim"></div>
+      <article class="identity-console">
+        <span class="command-eyebrow">DOMINION IDENTITY</span>
+        <h1>Choose your banner</h1>
+        <p>Your insignia identifies every front and command surface.</p>
+        <div id="flag-grid" class="flag-grid"></div>
+      </article>
+    </section>
+
+    <aside id="debug-hud" class="debug-console" style="display:none" aria-label="Debug telemetry">
+      <header><strong>DEBUG TELEMETRY</strong><span>F3</span></header>
+      <div><span>FPS / FRAME</span><strong id="dbg-fps">60 FPS</strong></div>
+      <div><span>FRAME TIME</span><strong id="dbg-frametime">16.6 ms</strong></div>
+      <div><span>SERVER TICK</span><strong id="dbg-tick">#0</strong></div>
+      <div><span>DELTAS</span><strong id="dbg-deltas">0</strong></div>
+      <div><span>CONNECTION</span><strong id="dbg-status">CONNECTING</strong></div>
+      <div><span>PLAYERS / BOTS</span><strong id="dbg-players">0</strong><strong id="dbg-bots">0</strong></div>
+      <div><span>SERVER RAM</span><strong id="dbg-ram">0 MB</strong></div>
+    </aside>
+  </div>
+
+  <section id="nation-creator" class="nation-creator" style="display: none !important;" aria-hidden="true" hidden aria-label="Custom nation creator">
+    <form id="nation-creator-form" class="nation-creator__card">
+      <div class="nation-creator__header">
+        <div><span class="command-eyebrow">FOUNDING CHARTER</span><h2>CREATE YOUR NATION</h2></div>
+        <button id="btn-close-nation-creator" class="console-dismiss" type="button">CLOSE</button>
+      </div>
+      <label>Nation name<input id="nation-name-input" maxlength="32" minlength="2" value="Dominion of Sol" required></label>
+      <div class="nation-creator__grid">
+        <label>Primary color<input id="nation-primary-input" type="color" value="#3B82F6"></label>
+        <label>Secondary color<input id="nation-secondary-input" type="color" value="#07131C"></label>
+        <label>Accent color<input id="nation-accent-input" type="color" value="#A7F3D0"></label>
+        <label>Flag layout<select id="nation-layout-input"><option>horizontalBicolor</option><option>horizontalTricolor</option><option>verticalBicolor</option><option>verticalTricolor</option><option>cross</option><option>diagonal</option><option>chevron</option></select></label>
+        <label>Emblem<select id="nation-emblem-input"><option>sun</option><option>star</option><option>shield</option><option>diamond</option><option>crescent</option><option>circle</option><option>eagle</option><option>none</option></select></label>
+        <label>Starting land cell<input id="nation-start-cell-input" type="number" min="0" placeholder="optional neutral land index"></label>
+      </div>
+      <div class="nation-doctrine">
+        <span class="command-eyebrow">LINKED DOCTRINE · ZERO-SUM OFFSETS</span>
+        <div class="nation-doctrine__row"><label>Offense <output id="doctrine-offense-value">0</output><input data-doctrine="offense" type="range" min="-6" max="6" value="0"></label><label>Defense <output id="doctrine-defense-value">0</output><input data-doctrine="defense" type="range" min="-6" max="6" value="0"></label><label>Expansion <output id="doctrine-expansion-value">0</output><input data-doctrine="expansion" type="range" min="-6" max="6" value="0"></label><label>Maritime <output id="doctrine-maritime-value">0</output><input data-doctrine="maritime" type="range" min="-6" max="6" value="0"></label></div>
+      </div>
+      <p id="nation-creator-status" class="nation-creator__status">All doctrine axes share one bounded budget.</p>
+      <div class="nation-creator__footer"><button class="command-button command-button--attack" type="submit">SAVE CHARTER</button></div>
+    </form>
+  </section>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

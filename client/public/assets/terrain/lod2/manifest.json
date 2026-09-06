@@ -1,0 +1,426 @@
+{
+  "cols": 8,
+  "rows": 4,
+  "tileWorldWidth": 512.0,
+  "tileWorldHeight": 512.0,
+  "tilePixelSize": 1024,
+  "lodLevel": 2,
+  "tiles": [
+    {
+      "col": 0,
+      "row": 0,
+      "file": "tile_0_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        0.0,
+        0.0,
+        512.0,
+        512.0
+      ]
+    },
+    {
+      "col": 1,
+      "row": 0,
+      "file": "tile_1_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        512.0,
+        0.0,
+        1024.0,
+        512.0
+      ]
+    },
+    {
+      "col": 2,
+      "row": 0,
+      "file": "tile_2_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1024.0,
+        0.0,
+        1536.0,
+        512.0
+      ]
+    },
+    {
+      "col": 3,
+      "row": 0,
+      "file": "tile_3_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1536.0,
+        0.0,
+        2048.0,
+        512.0
+      ]
+    },
+    {
+      "col": 4,
+      "row": 0,
+      "file": "tile_4_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2048.0,
+        0.0,
+        2560.0,
+        512.0
+      ]
+    },
+    {
+      "col": 5,
+      "row": 0,
+      "file": "tile_5_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2560.0,
+        0.0,
+        3072.0,
+        512.0
+      ]
+    },
+    {
+      "col": 6,
+      "row": 0,
+      "file": "tile_6_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3072.0,
+        0.0,
+        3584.0,
+        512.0
+      ]
+    },
+    {
+      "col": 7,
+      "row": 0,
+      "file": "tile_7_0.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3584.0,
+        0.0,
+        4096.0,
+        512.0
+      ]
+    },
+    {
+      "col": 0,
+      "row": 1,
+      "file": "tile_0_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        0.0,
+        512.0,
+        512.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 1,
+      "row": 1,
+      "file": "tile_1_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        512.0,
+        512.0,
+        1024.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 2,
+      "row": 1,
+      "file": "tile_2_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1024.0,
+        512.0,
+        1536.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 3,
+      "row": 1,
+      "file": "tile_3_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1536.0,
+        512.0,
+        2048.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 4,
+      "row": 1,
+      "file": "tile_4_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2048.0,
+        512.0,
+        2560.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 5,
+      "row": 1,
+      "file": "tile_5_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2560.0,
+        512.0,
+        3072.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 6,
+      "row": 1,
+      "file": "tile_6_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3072.0,
+        512.0,
+        3584.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 7,
+      "row": 1,
+      "file": "tile_7_1.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3584.0,
+        512.0,
+        4096.0,
+        1024.0
+      ]
+    },
+    {
+      "col": 0,
+      "row": 2,
+      "file": "tile_0_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        0.0,
+        1024.0,
+        512.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 1,
+      "row": 2,
+      "file": "tile_1_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        512.0,
+        1024.0,
+        1024.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 2,
+      "row": 2,
+      "file": "tile_2_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1024.0,
+        1024.0,
+        1536.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 3,
+      "row": 2,
+      "file": "tile_3_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1536.0,
+        1024.0,
+        2048.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 4,
+      "row": 2,
+      "file": "tile_4_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2048.0,
+        1024.0,
+        2560.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 5,
+      "row": 2,
+      "file": "tile_5_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2560.0,
+        1024.0,
+        3072.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 6,
+      "row": 2,
+      "file": "tile_6_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3072.0,
+        1024.0,
+        3584.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 7,
+      "row": 2,
+      "file": "tile_7_2.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3584.0,
+        1024.0,
+        4096.0,
+        1536.0
+      ]
+    },
+    {
+      "col": 0,
+      "row": 3,
+      "file": "tile_0_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        0.0,
+        1536.0,
+        512.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 1,
+      "row": 3,
+      "file": "tile_1_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        512.0,
+        1536.0,
+        1024.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 2,
+      "row": 3,
+      "file": "tile_2_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1024.0,
+        1536.0,
+        1536.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 3,
+      "row": 3,
+      "file": "tile_3_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        1536.0,
+        1536.0,
+        2048.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 4,
+      "row": 3,
+      "file": "tile_4_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2048.0,
+        1536.0,
+        2560.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 5,
+      "row": 3,
+      "file": "tile_5_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        2560.0,
+        1536.0,
+        3072.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 6,
+      "row": 3,
+      "file": "tile_6_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3072.0,
+        1536.0,
+        3584.0,
+        2048.0
+      ]
+    },
+    {
+      "col": 7,
+      "row": 3,
+      "file": "tile_7_3.rgba",
+      "hasLand": true,
+      "bytes": 4194304,
+      "worldBounds": [
+        3584.0,
+        1536.0,
+        4096.0,
+        2048.0
+      ]
+    }
+  ]
+}

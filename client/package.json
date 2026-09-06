@@ -1,0 +1,33 @@
+{
+  "name": "project-dominion-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "test:political": "esbuild src/render/PoliticalFieldCore.ts --bundle --platform=node --format=esm --outfile=.test-build/PoliticalFieldCore.mjs && node tests/political-field.test.mjs",
+    "test:political-world": "esbuild src/render/PoliticalFieldCore.ts --bundle --platform=node --format=esm --outfile=.test-build/PoliticalFieldCore.mjs && node tests/political-field-world.test.mjs",
+    "test:political-transitions": "node tests/political_transitions.test.mjs",
+    "test:presentation-a1": "node tests/political_presentation.test.mjs",
+    "test:ui": "node tests/ui_state_structure.test.mjs",
+    "test:dialog": "node tests/match_withdrawal_dialog.test.mjs",
+    "test:picking": "esbuild src/game/TargetResolver.ts --bundle --platform=node --format=esm --outfile=.test-build/TargetResolver.mjs && node tests/target_picking.test.mjs",
+    "test:coast": "esbuild src/render/PoliticalFieldCore.ts --bundle --platform=node --format=esm --outfile=.test-build/PoliticalFieldCore.mjs && node tests/coast_mapping.test.mjs",
+    "test:performance": "node tests/performance_profile.test.mjs",
+    "test:political-upload": "esbuild src/render/PoliticalTextureUpload.ts --bundle --platform=node --format=esm --packages=external --outfile=.test-build/PoliticalTextureUpload.mjs && node tests/political-upload.test.mjs",
+    "test:coast-mapping-world": "esbuild src/game/VisualGameplayMapping.ts --bundle --platform=node --format=esm --outfile=.test-build/VisualGameplayMapping.mjs && node tests/coast-mapping-world.test.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pixi.js": "^8.1.0"
+  },
+  "devDependencies": {
+    "pngjs": "^7.0.0",
+    "topojson-client": "^3.1.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.11",
+    "ws": "^8.21.3"
+  }
+}
