@@ -244,6 +244,10 @@ export class GameState {
         (window as any).__DOMINION_GAME_CLIENT__.currentMatchPhase = rawPhase;
       }
     }
+    this.selectedTargetCell = null;
+    this.selectionContext = null;
+    this.hoveredNeutralCell = null;
+    this.spotlightFactionId = null;
 
     let solOwnedCount = 0;
     let totalOwnedCount = 0;

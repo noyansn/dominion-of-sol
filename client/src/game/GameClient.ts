@@ -42,14 +42,33 @@ export const netTelemetry: NetTelemetry = {
   hudFactions: 0,
 };
 
-export const CLIENT_BUILD_ID = 'cli-2026-09-05-clean-fresh-p0';
+declare const __DOMINION_CLIENT_COMMIT__: string;
+declare const __DOMINION_BUILD_TIMESTAMP__: string;
+declare const __DOMINION_PROTOCOL_VERSION__: string;
+
+export const CLIENT_COMMIT = typeof __DOMINION_CLIENT_COMMIT__ !== 'undefined' ? __DOMINION_CLIENT_COMMIT__ : '068ea1da256bd897b7d6b8bd42371326526f3c79';
+export const CLIENT_BUILD_TIMESTAMP = typeof __DOMINION_BUILD_TIMESTAMP__ !== 'undefined' ? __DOMINION_BUILD_TIMESTAMP__ : '2026-09-06T16:56:00Z';
+export const CLIENT_PROTOCOL_VERSION = typeof __DOMINION_PROTOCOL_VERSION__ !== 'undefined' ? __DOMINION_PROTOCOL_VERSION__ : '1.0.0';
+
+export const CLIENT_BUILD_ID = CLIENT_COMMIT;
 (window as any).__CLIENT_BUILD_ID__ = CLIENT_BUILD_ID;
+(window as any).__DOMINION_CLIENT_COMMIT__ = CLIENT_COMMIT;
+(window as any).__DOMINION_BUILD_TIMESTAMP__ = CLIENT_BUILD_TIMESTAMP;
+(window as any).__DOMINION_PROTOCOL_VERSION__ = CLIENT_PROTOCOL_VERSION;
 (window as any).__DEV_NET_TELEMETRY__ = netTelemetry;
+
+console.log('==================================================');
+console.log('CLIENT BUILD');
+console.log(`commit=${CLIENT_COMMIT}`);
+console.log(`built=${CLIENT_BUILD_TIMESTAMP}`);
+console.log(`protocol=${CLIENT_PROTOCOL_VERSION}`);
+console.log('==================================================');
 
 declare global {
   interface Window {
     __DOMINION_GAME_CLIENT__?: GameClient;
     __GAME_CLIENT_INSTANCE_COUNT__?: number;
+    __DOMINION_BUILD_INFO__?: any;
   }
 }
 
@@ -226,9 +245,29 @@ export class GameClient {
     try {
       if ((msg as any).type === 'server_welcome') {
         const welcome = msg as any;
+        const serverCommit = welcome.serverCommit || welcome.buildId || 'unknown';
+        const serverPid = welcome.serverPid || 0;
+        const proto = welcome.protocolVersion || '1.0.0';
+
         (window as any).__SERVER_BUILD_FINGERPRINT__ = welcome;
-        console.log('[SERVER BUILD FINGERPRINT]', welcome);
-        console.log(`[BUILD VERIFIED] Client: ${CLIENT_BUILD_ID} | Server: ${welcome.buildId} (${welcome.buildTimestamp}) [Schema: ${welcome.gameplaySchemaVersion}]`);
+        (window as any).__DOMINION_BUILD_INFO__ = {
+          clientCommit: CLIENT_COMMIT,
+          serverCommit: serverCommit,
+          serverPid: serverPid,
+          protocolVersion: proto,
+          buildTimestamp: welcome.buildTimestamp,
+        };
+
+        console.log('==================================================');
+        console.log(`CLIENT COMMIT = ${CLIENT_COMMIT}`);
+        console.log(`SERVER COMMIT = ${serverCommit}`);
+        console.log(`PROTOCOL = ${proto}`);
+        console.log(`SERVER PID = ${serverPid}`);
+        console.log('==================================================');
+
+        if (serverCommit && serverCommit !== CLIENT_COMMIT) {
+          console.error(`[BUILD MISMATCH ERROR] Client commit (${CLIENT_COMMIT.slice(0, 7)}) differs from Server commit (${serverCommit.slice(0, 7)})!`);
+        }
       } else if (msg.type === 'world_snapshot') {
         netTelemetry.snapshotReceived = true;
         netTelemetry.snapshotFactions = msg.factions?.length || 0;

@@ -328,6 +328,10 @@ pub enum ServerMessage {
         build_timestamp: String,
         gameplay_schema_version: String,
         protocol_version: String,
+        #[serde(default)]
+        server_commit: String,
+        #[serde(default)]
+        server_pid: u32,
     },
 }
 

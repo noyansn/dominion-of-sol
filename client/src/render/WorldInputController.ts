@@ -470,4 +470,14 @@ export class WorldInputController {
     this.pinchDistance = 0;
     this.secondaryPointerId = null;
   }
+
+  public reset(): void {
+    this.gestureState = 'IDLE';
+    this.activePointerId = null;
+    this.clearClickCandidate();
+    this.pinchDistance = 0;
+    this.secondaryPointerId = null;
+    this.downTimeMs = 0;
+  }
 }
+

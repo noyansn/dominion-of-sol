@@ -387,7 +387,7 @@ export class DominionRenderer {
                 if (event === 'WORLD_SNAPSHOT' || event === 'FACTIONS_CHANGED' || event === 'PORT_RESULT') {
                     this.updateScreenSpaceOverlays();
                 }
-                if (event === 'WORLD_SNAPSHOT' && !this.introPlayedForMatchId) {
+                if (event === 'WORLD_SNAPSHOT' && uiStateManager.getAppSurface() === AppSurface.MATCH && !this.introPlayedForMatchId) {
                     this.handleMatchEntryCamera();
                 }
             }
@@ -1032,12 +1032,19 @@ export class DominionRenderer {
       window.clearTimeout(this.introTimer);
       this.introTimer = null;
     }
-    if (gameClient.isPreMatch()) {
+    if (uiStateManager.getAppSurface() === AppSurface.MATCH && gameClient.isPreMatch()) {
       gameClient.sendPlayerReady();
     }
   }
 
   public handleMatchEntryCamera(): void {
+    if (uiStateManager.getAppSurface() !== AppSurface.MATCH) {
+      if (this.introTimer !== null) {
+        window.clearTimeout(this.introTimer);
+        this.introTimer = null;
+      }
+      return;
+    }
     const currentMatchId = (window as any).__DOMINION_MATCH_ID__ || (gameState.isInitialized ? 'active_match' : 'fresh_match');
     if (this.introPlayedForMatchId === currentMatchId) return;
     this.introPlayedForMatchId = currentMatchId;
@@ -1072,13 +1079,13 @@ export class DominionRenderer {
       }
       this.introTimer = window.setTimeout(() => {
         this.introTimer = null;
-        if (gameClient.isPreMatch()) {
+        if (uiStateManager.getAppSurface() === AppSurface.MATCH && gameClient.isPreMatch()) {
           gameClient.sendPlayerReady();
         }
       }, 2300);
     } else {
-      // If no cell, ready immediately
-      if (gameClient.isPreMatch()) {
+      // If no cell, ready immediately if on match surface
+      if (uiStateManager.getAppSurface() === AppSurface.MATCH && gameClient.isPreMatch()) {
         gameClient.sendPlayerReady();
       }
     }
@@ -1274,6 +1281,14 @@ export class DominionRenderer {
     this.labels.clear();
     this.war.clear();
     this.selection.clear();
+    this.ownershipTransition.clear();
+    this.pendingPoliticalCells.clear();
+    this.inputController.reset();
+    this.introPlayedForMatchId = null;
+    if (this.introTimer !== null) {
+      window.clearTimeout(this.introTimer);
+      this.introTimer = null;
+    }
     this.strategicSites.container.visible = false;
     this.politicalFillContainer.visible = false;
     this.political.container.visible = false;

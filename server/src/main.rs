@@ -44,9 +44,10 @@ pub enum MatchPhase {
     Finished,
 }
 
-pub const BUILD_ID: &str = "srv-2026-09-05-clean-fresh-p0";
-pub const BUILD_TIMESTAMP: &str = "2026-09-05T13:50:00Z";
+pub const BUILD_ID: &str = env!("DOMINION_GIT_COMMIT");
+pub const BUILD_TIMESTAMP: &str = env!("DOMINION_BUILD_TIMESTAMP");
 pub const GAMEPLAY_SCHEMA_VERSION: &str = "v2.0.0-tiny-nucleus";
+pub const MATCH_LIFECYCLE_VERSION: &str = "v2.1-authoritative-player-ready";
 
 pub struct ActiveMatch {
     pub match_id: String,
@@ -92,25 +93,19 @@ fn match_state_info(phase: MatchPhase, active_match: Option<&ActiveMatch>) -> Ma
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("============================================================");
-    println!("PROJECT DOMINION RUST SERVER (20 Hz Authoritative Simulator)");
-    println!("Milestone: 100-Player World Scale Foundation & Territory Geometry 2.0");
-    println!(
-        "Map Topology: World Geography 2:1 ({}x{} = {} Cells)",
-        WORLD_WIDTH, WORLD_HEIGHT, TOTAL_CELLS
-    );
+    let pid = std::process::id();
+    let binary_path = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    println!("==================================================");
+    println!("SERVER BUILD");
+    println!("DOMINION SERVER");
+    println!("commit={}", BUILD_ID);
+    println!("built={}", BUILD_TIMESTAMP);
+    println!("pid={}", pid);
+    println!("protocol={}", crate::protocol::PROTOCOL_VERSION);
+    println!("binary={}", binary_path);
+    println!("lifecycle={}", MATCH_LIFECYCLE_VERSION);
     println!("Listening on: ws://127.0.0.1:8765");
-    println!("============================================================");
-    println!("[SERVER BUILD]");
-    println!("MATCH_LIFECYCLE_V2");
-    println!("DOMINION_SERVER_BUILD=POPULATION_STRATEGY_RUNTIME_1");
-    println!("pid={}", std::process::id());
-    println!("");
-    println!("[MATCH]");
-    println!("phase=WaitingForPlayer");
-    println!("humanSessions=0");
-    println!("gameplayTick=0");
-    println!("botAttempts=0");
+    println!("==================================================");
 
     let args: Vec<String> = std::env::args().collect();
     
@@ -212,13 +207,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             if rt.phase == MatchPhase::PreMatch {
-                if let Some(am) = rt.active_match.as_mut() {
-                    am.pre_match_failsafe_ticks += 1;
-                    if am.pre_match_failsafe_ticks > 600 {
-                        println!("[LIFECYCLE] PreMatch failsafe reached (30s); starting match {}", am.match_id);
-                        rt.phase = MatchPhase::Running;
-                    }
-                }
+                // PreMatch: simulation is strictly frozen at tick 0 awaiting explicit ClientMessage::PlayerReady.
+                // Absolutely NO auto-advancement, NO AI orders, NO tick increments before readiness!
                 continue;
             }
             if rt.human_session_count == 0 {
@@ -418,6 +408,8 @@ async fn handle_connection(
         build_timestamp: BUILD_TIMESTAMP.to_string(),
         gameplay_schema_version: GAMEPLAY_SCHEMA_VERSION.to_string(),
         protocol_version: crate::protocol::PROTOCOL_VERSION.to_string(),
+        server_commit: BUILD_ID.to_string(),
+        server_pid: std::process::id(),
     };
     if let Ok(json) = serde_json::to_string(&welcome) {
         let _ = tx.try_send(Message::Text(json));
@@ -655,6 +647,40 @@ async fn handle_connection(
                             }
 
                             println!("[NET] Player Joined: '{}' from {}", player_name, addr);
+
+                            {
+                                let rt = match_runtime.read().await;
+                                if let Some(am) = rt.active_match.as_ref() {
+                                    let is_human_dead = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(true, |f| f.is_eliminated || f.territory_count == 0);
+                                    let human_cells = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(0, |f| f.territory_count);
+                                    let human_pop = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(0.0, |f| f.population);
+                                    let active_nations = am.sim.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
+                                    let is_running = rt.phase == MatchPhase::Running;
+                                    let entry_mode = if am.sim.tick == 0 { "NEW_MATCH" } else { "RESUME_MATCH" };
+
+                                    println!("==================================================");
+                                    println!("ENTRY MODE = {}", entry_mode);
+                                    println!("MATCH ID = {}", am.match_id);
+                                    println!("MATCH CREATED AT = {}", am.creation_timestamp);
+                                    println!("CURRENT TICK = {}", am.sim.tick);
+                                    println!("PLAYER READY = {}", is_running);
+                                    println!("SIMULATION RUNNING = {}", is_running);
+                                    println!("NATION COUNT = {}", active_nations);
+                                    println!("HUMAN FACTION STATUS = {}", if is_human_dead { "DEFEATED" } else { "ALIVE" });
+                                    println!("HUMAN LAND CELLS = {}", human_cells);
+                                    println!("HUMAN POPULATION = {:.0}", human_pop);
+                                    println!("AI ORDERS BEFORE READY = {}", if am.sim.tick == 0 { 0 } else { am.bot_manager.attempts });
+                                    println!("OWNERSHIP MUTATIONS BEFORE READY = {}", if am.sim.tick == 0 { 0 } else { am.sim.sequence });
+                                    println!("ELIMINATIONS BEFORE READY = {}", 44usize.saturating_sub(active_nations));
+                                    println!("==================================================");
+
+                                    if entry_mode == "NEW_MATCH" {
+                                        assert_eq!(am.sim.tick, 0, "Assertion failed: New match tick > 0 before ready");
+                                        assert_eq!(active_nations, 44, "Assertion failed: New match nations < 44 before ready");
+                                        assert!(!is_human_dead, "Assertion failed: Human player eliminated at tick 0 before ready");
+                                    }
+                                }
+                            }
 
                             if let Some(flag) = flag_id.filter(|id| {
                                 matches!(
