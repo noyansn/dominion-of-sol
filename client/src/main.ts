@@ -157,6 +157,7 @@ async function bootstrap() {
             new NationCreator();
             civSelector = new CivilizationSelector();
             (window as any).__DOMINION_CIVILIZATION_SELECTOR__ = civSelector;
+            (window as any).__DOMINION_CIV_SELECTOR__ = civSelector;
             const countryDossier = new CountryDossier();
             (window as any).__DOMINION_COUNTRY_DOSSIER__ = countryDossier;
             const debugHUD = new DebugHUD();
