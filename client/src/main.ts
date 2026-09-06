@@ -18,6 +18,17 @@ import { sovereignArmory } from './ui/SovereignArmory';
 import { playerProfileModal } from './ui/PlayerProfileModal';
 import { nationsDrawer } from './ui/NationsDrawer';
 
+// Development safety: ensure no service workers cache stale bundles on localhost
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+    navigator.serviceWorker.getRegistrations().then((regs) => {
+        for (const reg of regs) {
+            reg.unregister().then((unreg) => {
+                if (unreg) console.log('[DEV] Unregistered stale service worker for development safety:', reg.scope);
+            });
+        }
+    }).catch(() => {});
+}
+
 function bootStep(message: string) {
     console.log(`[BOOT] ${message}`);
 }

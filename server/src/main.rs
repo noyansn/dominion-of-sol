@@ -403,6 +403,14 @@ async fn handle_connection(
 
     peers.write().await.insert(addr, tx.clone());
 
+    let (cur_match_id, cur_tick) = {
+        let rt = match_runtime.read().await;
+        (
+            rt.active_match.as_ref().map(|m| m.match_id.clone()),
+            rt.active_match.as_ref().map(|m| m.sim.tick).unwrap_or(0),
+        )
+    };
+
     let welcome = ServerMessage::ServerWelcome {
         build_id: BUILD_ID.to_string(),
         build_timestamp: BUILD_TIMESTAMP.to_string(),
@@ -410,6 +418,8 @@ async fn handle_connection(
         protocol_version: crate::protocol::PROTOCOL_VERSION.to_string(),
         server_commit: BUILD_ID.to_string(),
         server_pid: std::process::id(),
+        current_match_id: cur_match_id,
+        current_tick: cur_tick,
     };
     if let Ok(json) = serde_json::to_string(&welcome) {
         let _ = tx.try_send(Message::Text(json));
@@ -436,6 +446,30 @@ async fn handle_connection(
             Ok(Message::Text(text)) => {
                 if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
                     match msg {
+                        ClientMessage::DevDiagnostic => {
+                            let (diag_m_id, diag_tick, diag_phase, diag_alive) = {
+                                let rt = match_runtime.read().await;
+                                (
+                                    rt.active_match.as_ref().map(|m| m.match_id.clone()),
+                                    rt.active_match.as_ref().map(|m| m.sim.tick).unwrap_or(0),
+                                    format!("{:?}", rt.phase),
+                                    rt.active_match.as_ref().map(|m| m.sim.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count()).unwrap_or(0),
+                                )
+                            };
+                            let diag = ServerMessage::DevDiagnostic {
+                                commit: BUILD_ID.to_string(),
+                                build_timestamp: BUILD_TIMESTAMP.to_string(),
+                                pid: std::process::id(),
+                                protocol_version: crate::protocol::PROTOCOL_VERSION.to_string(),
+                                current_match_id: diag_m_id,
+                                current_tick: diag_tick,
+                                phase: diag_phase,
+                                alive_factions: diag_alive,
+                            };
+                            if let Ok(json) = serde_json::to_string(&diag) {
+                                let _ = tx.try_send(Message::Text(json));
+                            }
+                        }
                         ClientMessage::PlayerJoin {
                             player_name,
                             protocol_version,

@@ -103,7 +103,31 @@ export class GameClient {
     return this.currentMatchPhase === 'PRE_MATCH' || this.currentMatchPhase === 'PreMatch' || (window as any).__DOMINION_MATCH_PHASE__ === 'PreMatch' || (window as any).__DOMINION_MATCH_PHASE__ === 'PRE_MATCH';
   }
 
+  public queryDevDiagnostic(): Promise<any> {
+    return new Promise((resolve) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        resolve({ error: 'disconnected' });
+        return;
+      }
+      const handler = (event: MessageEvent) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'dev_diagnostic') {
+            this.ws?.removeEventListener('message', handler);
+            resolve(data);
+          }
+        } catch {}
+      };
+      this.ws.addEventListener('message', handler);
+      this.send({ type: 'dev_diagnostic' });
+    });
+  }
+
   public sendPlayerJoin(action?: 'NEW_MATCH' | 'RESUME_MATCH'): void {
+    if ((window as any).__DOMINION_BUILD_MATCH__ === false && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+      console.error('[DEV ERROR] Cannot start/resume match: Localhost Client commit does not match Server commit! Restart dev environment.');
+      return;
+    }
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.connect();
       return;
@@ -265,8 +289,47 @@ export class GameClient {
         console.log(`SERVER PID = ${serverPid}`);
         console.log('==================================================');
 
-        if (serverCommit && serverCommit !== CLIENT_COMMIT) {
-          console.error(`[BUILD MISMATCH ERROR] Client commit (${CLIENT_COMMIT.slice(0, 7)}) differs from Server commit (${serverCommit.slice(0, 7)})!`);
+        const isMatch = serverCommit === CLIENT_COMMIT;
+        (window as any).__DOMINION_BUILD_MATCH__ = isMatch;
+
+        // Render development diagnostic pill in browser
+        if (typeof document !== 'undefined') {
+          let badge = document.getElementById('dominion-dev-badge');
+          if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'dominion-dev-badge';
+            badge.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:99999;background:rgba(7,17,28,0.88);border:1px solid rgba(255,255,255,0.18);border-radius:4px;padding:3px 8px;font-family:monospace;font-size:11px;color:#cbd5e1;pointer-events:none;display:flex;align-items:center;gap:6px;box-shadow:0 2px 6px rgba(0,0,0,0.4);';
+            document.body.appendChild(badge);
+          }
+          const dotColor = isMatch ? '#22c55e' : '#ef4444';
+          badge.innerHTML = `<span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${dotColor};box-shadow:0 0 6px ${dotColor};"></span><span>DEV ${CLIENT_COMMIT.slice(0, 7)} · SERVER ${serverCommit.slice(0, 7)}</span>`;
+
+          // If mismatch in local development, display prominent warning overlay
+          if (!isMatch && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
+            console.error(`[BUILD MISMATCH ERROR] Client commit (${CLIENT_COMMIT.slice(0, 7)}) differs from Server commit (${serverCommit.slice(0, 7)})!`);
+            let modal = document.getElementById('dominion-build-mismatch-modal');
+            if (!modal) {
+              modal = document.createElement('div');
+              modal.id = 'dominion-build-mismatch-modal';
+              modal.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;backdrop-filter:blur(8px);';
+              modal.innerHTML = `
+                <div style="background:#0f172a;border:2px solid #ef4444;border-radius:12px;padding:28px;max-width:540px;text-align:center;color:#f8fafc;font-family:sans-serif;box-shadow:0 25px 50px -12px rgba(0,0,0,0.7);">
+                  <div style="font-size:26px;font-weight:bold;margin-bottom:12px;color:#ef4444;">⚠️ BUILD MISMATCH</div>
+                  <div style="font-size:14px;line-height:1.6;color:#cbd5e1;margin-bottom:24px;">
+                    Localhost client and server revisions do not match:<br><br>
+                    <div style="background:#1e293b;padding:12px;border-radius:6px;font-family:monospace;text-align:left;font-size:12px;margin-bottom:12px;">
+                      <div><strong style="color:#38bdf8;">CLIENT COMMIT:</strong> ${CLIENT_COMMIT}</div>
+                      <div><strong style="color:#f87171;">SERVER COMMIT:</strong> ${serverCommit}</div>
+                      <div><strong style="color:#94a3b8;">SERVER PID:</strong> ${serverPid}</div>
+                    </div>
+                    Restart the development environment using <code>./start_dev.ps1</code> to synchronize binaries.
+                  </div>
+                  <button onclick="location.reload()" style="background:#dc2626;color:white;border:none;padding:10px 24px;border-radius:6px;font-weight:bold;cursor:pointer;font-size:13px;">RELOAD CLIENT</button>
+                </div>
+              `;
+              document.body.appendChild(modal);
+            }
+          }
         }
       } else if (msg.type === 'world_snapshot') {
         netTelemetry.snapshotReceived = true;

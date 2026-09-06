@@ -332,12 +332,33 @@ pub enum ServerMessage {
         server_commit: String,
         #[serde(default)]
         server_pid: u32,
+        #[serde(default)]
+        current_match_id: Option<String>,
+        #[serde(default)]
+        current_tick: u64,
+    },
+
+    #[serde(rename = "dev_diagnostic")]
+    #[serde(rename_all = "camelCase")]
+    DevDiagnostic {
+        commit: String,
+        build_timestamp: String,
+        pid: u32,
+        protocol_version: String,
+        current_match_id: Option<String>,
+        current_tick: u64,
+        phase: String,
+        alive_factions: usize,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    #[serde(rename = "dev_diagnostic")]
+    #[serde(rename_all = "camelCase")]
+    DevDiagnostic,
+
     #[serde(rename = "player_join")]
     #[serde(rename_all = "camelCase")]
     PlayerJoin {
