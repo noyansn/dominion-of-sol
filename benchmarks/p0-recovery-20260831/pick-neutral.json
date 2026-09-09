@@ -1,0 +1,302 @@
+[
+  {
+    "point": {
+      "cell": 18858,
+      "x": 426.125,
+      "y": 18.375,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 18857
+    },
+    "result": {
+      "worldX": 426.125,
+      "worldY": 18.375,
+      "longitude": -30.1904296875,
+      "latitude": 83.5400390625,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 18858,
+      "resolvedCell": 18858,
+      "clickedCell": 18858,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 18857,
+      "targetCell": 18858,
+      "nearestLegalAnchor": 18858,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 20878,
+      "x": 398.125,
+      "y": 20.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 20879
+    },
+    "result": {
+      "worldX": 398.125,
+      "worldY": 20.125,
+      "longitude": -40.0341796875,
+      "latitude": 82.9248046875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 20878,
+      "resolvedCell": 20878,
+      "clickedCell": 20878,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 20879,
+      "targetCell": 20878,
+      "nearestLegalAnchor": 20878,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 20907,
+      "x": 427.125,
+      "y": 20.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 20906
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 20.125,
+      "longitude": -29.8388671875,
+      "latitude": 82.9248046875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 20907,
+      "resolvedCell": 20907,
+      "clickedCell": 20907,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 20906,
+      "targetCell": 20907,
+      "nearestLegalAnchor": 20907,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 21931,
+      "x": 427.125,
+      "y": 21.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 21930
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 21.125,
+      "longitude": -29.8388671875,
+      "latitude": 82.5732421875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 21931,
+      "resolvedCell": 21931,
+      "clickedCell": 21931,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 21930,
+      "targetCell": 21931,
+      "nearestLegalAnchor": 21931,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 23979,
+      "x": 427.125,
+      "y": 23.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 23978
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 23.125,
+      "longitude": -29.8388671875,
+      "latitude": 81.8701171875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 23979,
+      "resolvedCell": 23979,
+      "clickedCell": 23979,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 23978,
+      "targetCell": 23979,
+      "nearestLegalAnchor": 23979,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 25003,
+      "x": 427.125,
+      "y": 24.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 25002
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 24.125,
+      "longitude": -29.8388671875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 25003,
+      "resolvedCell": 25003,
+      "clickedCell": 25003,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 25002,
+      "targetCell": 25003,
+      "nearestLegalAnchor": 25003,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 26027,
+      "x": 427.125,
+      "y": 25.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 26026
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 25.125,
+      "longitude": -29.8388671875,
+      "latitude": 81.1669921875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 26027,
+      "resolvedCell": 26027,
+      "clickedCell": 26027,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 26026,
+      "targetCell": 26027,
+      "nearestLegalAnchor": 26027,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 27051,
+      "x": 427.125,
+      "y": 26.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 27050
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 26.125,
+      "longitude": -29.8388671875,
+      "latitude": 80.8154296875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 27051,
+      "resolvedCell": 27051,
+      "clickedCell": 27051,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 27050,
+      "targetCell": 27051,
+      "nearestLegalAnchor": 27051,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 28075,
+      "x": 427.125,
+      "y": 27.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 28074
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 27.125,
+      "longitude": -29.8388671875,
+      "latitude": 80.4638671875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 28075,
+      "resolvedCell": 28075,
+      "clickedCell": 28075,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 28074,
+      "targetCell": 28075,
+      "nearestLegalAnchor": 28075,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 29099,
+      "x": 427.125,
+      "y": 28.125,
+      "action": "EXPAND_FRONTIER",
+      "relation": "ADJACENT_NEUTRAL",
+      "source": 29098
+    },
+    "result": {
+      "worldX": 427.125,
+      "worldY": 28.125,
+      "longitude": -29.8388671875,
+      "latitude": 80.1123046875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 29099,
+      "resolvedCell": 29099,
+      "clickedCell": 29099,
+      "ownerId": 0,
+      "relation": "ADJACENT_NEUTRAL",
+      "action": "EXPAND_FRONTIER",
+      "sourceCell": 29098,
+      "targetCell": 29099,
+      "nearestLegalAnchor": 29099,
+      "rejectionReason": "Neutral frontier resolved. Population can be committed to expand here.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  }
+]

@@ -1,0 +1,104 @@
+{
+  "width": 360,
+  "height": 180,
+  "totalCells": 64800,
+  "aspectRatio": "2:1",
+  "chokepoints": [
+    {
+      "id": "bosphorus",
+      "name": "Bosphorus Strait",
+      "type": "STRAIT",
+      "coordA": {
+        "x": 208,
+        "y": 49,
+        "name": "Thrace (Europe)"
+      },
+      "coordB": {
+        "x": 210,
+        "y": 49,
+        "name": "Anatolia (Asia)"
+      },
+      "strategicValue": 100
+    },
+    {
+      "id": "dardanelles",
+      "name": "Dardanelles Strait",
+      "type": "STRAIT",
+      "coordA": {
+        "x": 206,
+        "y": 50,
+        "name": "Gallipoli"
+      },
+      "coordB": {
+        "x": 208,
+        "y": 50,
+        "name": "Troas"
+      },
+      "strategicValue": 90
+    },
+    {
+      "id": "gibraltar",
+      "name": "Strait of Gibraltar",
+      "type": "STRAIT",
+      "coordA": {
+        "x": 174,
+        "y": 54,
+        "name": "Iberia"
+      },
+      "coordB": {
+        "x": 174,
+        "y": 56,
+        "name": "Morocco"
+      },
+      "strategicValue": 95
+    },
+    {
+      "id": "suez",
+      "name": "Suez Canal / Isthmus",
+      "type": "ISTHMUS",
+      "coordA": {
+        "x": 212,
+        "y": 60,
+        "name": "Nile Delta"
+      },
+      "coordB": {
+        "x": 213,
+        "y": 60,
+        "name": "Sinai Peninsula"
+      },
+      "strategicValue": 100
+    },
+    {
+      "id": "panama",
+      "name": "Panama Isthmus",
+      "type": "ISTHMUS",
+      "coordA": {
+        "x": 100,
+        "y": 81,
+        "name": "Central America"
+      },
+      "coordB": {
+        "x": 102,
+        "y": 82,
+        "name": "South America"
+      },
+      "strategicValue": 95
+    },
+    {
+      "id": "english_channel",
+      "name": "English Channel",
+      "type": "STRAIT",
+      "coordA": {
+        "x": 179,
+        "y": 39,
+        "name": "Dover (Britain)"
+      },
+      "coordB": {
+        "x": 181,
+        "y": 40,
+        "name": "Calais (France)"
+      },
+      "strategicValue": 85
+    }
+  ]
+}

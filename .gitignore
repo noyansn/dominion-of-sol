@@ -3,17 +3,54 @@ server/target/
 server/target-msvc/
 client/dist/
 client/.test-build/
+scripts/target/
 *.log
 node_modules/
 client/node_modules/
 .tmp/
 .benchmark*
 .qa-*
+# Binary / large data files
 *.bin
 *.csv
-*.txt
+# Videos & media
+evidence-video/
+*.mp4
+*.webm
+*.mov
+*.avi
+*.mkv
+# Images in root (audit screenshots etc.)
+gallery_audit_*.png
+political_*.png
+political_*.bin
+raw_owner_*.png
+images.jpg
+# Large PDFs
+*.pdf
+# Scratch / build artifacts
 scratch/
 artifacts/
 debug_export/
 qa_screenshots/
+# JSON data exports
+first-delta.json
+20-delta.json
+client/first-delta.json
+client/20-delta.json
+# Text outputs
+*.txt
+out.txt
+out_audit.txt
+# Faction asset dirs (large asset-only folders)
+han/
+lakota/
+maya/
+misir/
+norse/
+pers/
+roma/
+turk/
+turkyikilmis/
+yamato/
 

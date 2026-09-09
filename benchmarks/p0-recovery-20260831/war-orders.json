@@ -1,0 +1,59 @@
+[
+  {
+    "selection": {
+      "worldX": 405.125,
+      "worldY": 24.125,
+      "longitude": -37.5732421875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24981,
+      "resolvedCell": 24981,
+      "clickedCell": 24981,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23957,
+      "targetCell": 24981,
+      "nearestLegalAnchor": 24981,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    },
+    "outcome": {
+      "type": "attack_result",
+      "accepted": true,
+      "sourceCellIndex": 23957,
+      "targetCellIndex": 24981,
+      "frontId": 19,
+      "deployedPopulation": 4500.010896504196,
+      "reason": "accepted"
+    },
+    "front": {
+      "frontId": 19,
+      "factionA": 64,
+      "factionB": 101,
+      "deployedPopulationA": 6483.368886331446,
+      "deployedPopulationB": 4499.831033869893,
+      "pressure": -0.077084504,
+      "centroidX": 405,
+      "centroidY": 23.5,
+      "normalX": 0,
+      "normalY": -1,
+      "isCombatActive": true,
+      "attackerFaction": 101,
+      "attackMode": "LAND_OFFENSIVE",
+      "startedTick": 603,
+      "capturedCells": 0,
+      "terminationReason": "ACTIVE",
+      "sourceCellIndex": 23957,
+      "targetCellIndex": 24981,
+      "localDefensePopulation": 6483.368886331446,
+      "defenseFocusPopulation": 6483.629828690268,
+      "sharedLocalForcePopulation": 0,
+      "casualties": 0.44080499312601074,
+      "operationKind": "LAND_OFFENSIVE",
+      "survivorsReturned": false
+    }
+  }
+]

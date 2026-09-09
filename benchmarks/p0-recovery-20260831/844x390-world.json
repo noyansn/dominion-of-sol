@@ -1,0 +1,137 @@
+{
+  "durationMs": 10016,
+  "warmupMs": 2000,
+  "frames": 600,
+  "avgFps": 59.9,
+  "avgFrameMs": 16.69,
+  "medianFrameMs": 16.7,
+  "p95FrameMs": 16.8,
+  "p99FrameMs": 16.9,
+  "terrainSource": "GLOBAL",
+  "residentTiles": 0,
+  "visibleTiles": 0,
+  "visibleLabels": 3,
+  "cameraScale": 0.75,
+  "projection": "FLAT",
+  "rendererResolution": 1.25,
+  "viewport": {
+    "width": 844,
+    "height": 390
+  },
+  "DPR": 2,
+  "mapRenderDPR": 1.25,
+  "device": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "hardwareConcurrency": 12,
+    "maxTouchPoints": 0
+  },
+  "frontCount": 0,
+  "activeCombatFrames": 0,
+  "multiFrontFrames": 0,
+  "activeCombatCoverage": 0,
+  "hiddenFrames": 0,
+  "sampleValid": true,
+  "invalidReasons": [],
+  "cameraPosition": {
+    "x": 37.85,
+    "y": 2.93
+  },
+  "visibleWorldFraction": 0.9,
+  "politicalDirtyPixelsPerFrame": 12.37,
+  "systemTimings": {
+    "politicalDirty": {
+      "count": 600,
+      "totalMs": 8.4,
+      "maxMs": 1.6
+    },
+    "politicalColorFlush": {
+      "count": 600,
+      "totalMs": 4.4,
+      "maxMs": 0.3
+    },
+    "politicalOwnerFlush": {
+      "count": 600,
+      "totalMs": 2.6,
+      "maxMs": 0.1
+    },
+    "terrain": {
+      "count": 600,
+      "totalMs": 4.6,
+      "maxMs": 0.2
+    },
+    "borders": {
+      "count": 600,
+      "totalMs": 14.8,
+      "maxMs": 4.2
+    },
+    "war": {
+      "count": 600,
+      "totalMs": 8.6,
+      "maxMs": 0.3
+    },
+    "capitals": {
+      "count": 600,
+      "totalMs": 16.4,
+      "maxMs": 0.2
+    }
+  },
+  "gpu": {
+    "webglVersion": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+    "vendor": "Google Inc. (Intel)",
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A68) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "authoritativeOperations": {
+    "before": [
+      {
+        "id": 691,
+        "active": false,
+        "captured": 20,
+        "casualties": 6.585759414793846,
+        "source": 114198,
+        "target": 114197
+      },
+      {
+        "id": 743,
+        "active": false,
+        "captured": 0,
+        "casualties": 0.12734508821851584,
+        "source": 125470,
+        "target": 125469
+      },
+      {
+        "id": 771,
+        "active": false,
+        "captured": 0,
+        "casualties": 0.16981696870157964,
+        "source": 125470,
+        "target": 125469
+      }
+    ],
+    "after": [
+      {
+        "id": 691,
+        "active": false,
+        "captured": 20,
+        "casualties": 6.585759414793846,
+        "source": 114198,
+        "target": 114197
+      },
+      {
+        "id": 743,
+        "active": false,
+        "captured": 0,
+        "casualties": 0.12734508821851584,
+        "source": 125470,
+        "target": 125469
+      },
+      {
+        "id": 771,
+        "active": false,
+        "captured": 0,
+        "casualties": 0.16981696870157964,
+        "source": 125470,
+        "target": 125469
+      }
+    ]
+  }
+}

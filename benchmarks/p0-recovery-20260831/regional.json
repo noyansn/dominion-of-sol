@@ -1,0 +1,87 @@
+{
+  "durationMs": 10016,
+  "warmupMs": 2000,
+  "frames": 599,
+  "avgFps": 59.8,
+  "avgFrameMs": 16.72,
+  "medianFrameMs": 16.7,
+  "p95FrameMs": 17,
+  "p99FrameMs": 17.1,
+  "terrainSource": "REGIONAL",
+  "residentTiles": 24,
+  "visibleTiles": 8,
+  "visibleLabels": 4,
+  "cameraScale": 8,
+  "projection": "FLAT",
+  "rendererResolution": 1,
+  "viewport": {
+    "width": 1536,
+    "height": 776
+  },
+  "DPR": 1.25,
+  "mapRenderDPR": 1,
+  "device": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "hardwareConcurrency": 12,
+    "maxTouchPoints": 0
+  },
+  "frontCount": 0,
+  "activeCombatFrames": 0,
+  "multiFrontFrames": 0,
+  "activeCombatCoverage": 0,
+  "hiddenFrames": 0,
+  "sampleValid": true,
+  "invalidReasons": [],
+  "cameraPosition": {
+    "x": -3664,
+    "y": -620
+  },
+  "visibleWorldFraction": 1,
+  "politicalDirtyPixelsPerFrame": 19.45,
+  "systemTimings": {
+    "politicalDirty": {
+      "count": 599,
+      "totalMs": 20.8,
+      "maxMs": 3.9
+    },
+    "politicalColorFlush": {
+      "count": 599,
+      "totalMs": 5,
+      "maxMs": 0.4
+    },
+    "politicalOwnerFlush": {
+      "count": 599,
+      "totalMs": 9.9,
+      "maxMs": 3.8
+    },
+    "terrain": {
+      "count": 599,
+      "totalMs": 5.4,
+      "maxMs": 0.2
+    },
+    "borders": {
+      "count": 599,
+      "totalMs": 40.9,
+      "maxMs": 16.9
+    },
+    "war": {
+      "count": 599,
+      "totalMs": 7.8,
+      "maxMs": 0.3
+    },
+    "capitals": {
+      "count": 599,
+      "totalMs": 31.6,
+      "maxMs": 3.3
+    }
+  },
+  "gpu": {
+    "webglVersion": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+    "vendor": "Google Inc. (Intel)",
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A68) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "authoritativeOperations": {
+    "before": [],
+    "after": []
+  }
+}

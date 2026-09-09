@@ -1,0 +1,302 @@
+[
+  {
+    "point": {
+      "cell": 22925,
+      "x": 397.125,
+      "y": 22.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 22926
+    },
+    "result": {
+      "worldX": 397.125,
+      "worldY": 22.125,
+      "longitude": -40.3857421875,
+      "latitude": 82.2216796875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 22925,
+      "resolvedCell": 22925,
+      "clickedCell": 22925,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 22926,
+      "targetCell": 22925,
+      "nearestLegalAnchor": 22925,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24974,
+      "x": 398.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23950
+    },
+    "result": {
+      "worldX": 398.125,
+      "worldY": 24.125,
+      "longitude": -40.0341796875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24974,
+      "resolvedCell": 24974,
+      "clickedCell": 24974,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23950,
+      "targetCell": 24974,
+      "nearestLegalAnchor": 24974,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 23949,
+      "x": 397.125,
+      "y": 23.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23950
+    },
+    "result": {
+      "worldX": 397.125,
+      "worldY": 23.125,
+      "longitude": -40.3857421875,
+      "latitude": 81.8701171875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 23949,
+      "resolvedCell": 23949,
+      "clickedCell": 23949,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23950,
+      "targetCell": 23949,
+      "nearestLegalAnchor": 23949,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24975,
+      "x": 399.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23951
+    },
+    "result": {
+      "worldX": 399.125,
+      "worldY": 24.125,
+      "longitude": -39.6826171875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24975,
+      "resolvedCell": 24975,
+      "clickedCell": 24975,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23951,
+      "targetCell": 24975,
+      "nearestLegalAnchor": 24975,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24976,
+      "x": 400.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23952
+    },
+    "result": {
+      "worldX": 400.125,
+      "worldY": 24.125,
+      "longitude": -39.3310546875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24976,
+      "resolvedCell": 24976,
+      "clickedCell": 24976,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23952,
+      "targetCell": 24976,
+      "nearestLegalAnchor": 24976,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24977,
+      "x": 401.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23953
+    },
+    "result": {
+      "worldX": 401.125,
+      "worldY": 24.125,
+      "longitude": -38.9794921875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24977,
+      "resolvedCell": 24977,
+      "clickedCell": 24977,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23953,
+      "targetCell": 24977,
+      "nearestLegalAnchor": 24977,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24978,
+      "x": 402.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23954
+    },
+    "result": {
+      "worldX": 402.125,
+      "worldY": 24.125,
+      "longitude": -38.6279296875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24978,
+      "resolvedCell": 24978,
+      "clickedCell": 24978,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23954,
+      "targetCell": 24978,
+      "nearestLegalAnchor": 24978,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24979,
+      "x": 403.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23955
+    },
+    "result": {
+      "worldX": 403.125,
+      "worldY": 24.125,
+      "longitude": -38.2763671875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24979,
+      "resolvedCell": 24979,
+      "clickedCell": 24979,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23955,
+      "targetCell": 24979,
+      "nearestLegalAnchor": 24979,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24980,
+      "x": 404.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23956
+    },
+    "result": {
+      "worldX": 404.125,
+      "worldY": 24.125,
+      "longitude": -37.9248046875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24980,
+      "resolvedCell": 24980,
+      "clickedCell": 24980,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23956,
+      "targetCell": 24980,
+      "nearestLegalAnchor": 24980,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  },
+  {
+    "point": {
+      "cell": 24981,
+      "x": 405.125,
+      "y": 24.125,
+      "action": "LAUNCH_OFFENSIVE",
+      "relation": "ADJACENT_HOSTILE",
+      "source": 23957
+    },
+    "result": {
+      "worldX": 405.125,
+      "worldY": 24.125,
+      "longitude": -37.5732421875,
+      "latitude": 81.5185546875,
+      "canonicalLand": true,
+      "visualComponentId": "UNAVAILABLE (visual mask has no component IDs)",
+      "rawCell": 24981,
+      "resolvedCell": 24981,
+      "clickedCell": 24981,
+      "ownerId": 64,
+      "relation": "ADJACENT_HOSTILE",
+      "action": "LAUNCH_OFFENSIVE",
+      "sourceCell": 23957,
+      "targetCell": 24981,
+      "nearestLegalAnchor": 24981,
+      "rejectionReason": "Shared frontier resolved. Choose Population deployment.",
+      "screenX": 768,
+      "screenY": 388
+    }
+  }
+]

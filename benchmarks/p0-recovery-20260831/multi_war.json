@@ -1,0 +1,137 @@
+{
+  "durationMs": 10016,
+  "warmupMs": 2000,
+  "frames": 600,
+  "avgFps": 59.9,
+  "avgFrameMs": 16.69,
+  "medianFrameMs": 16.7,
+  "p95FrameMs": 16.9,
+  "p99FrameMs": 17.1,
+  "terrainSource": "REGIONAL",
+  "residentTiles": 15,
+  "visibleTiles": 6,
+  "visibleLabels": 4,
+  "cameraScale": 12,
+  "projection": "FLAT",
+  "rendererResolution": 1,
+  "viewport": {
+    "width": 1536,
+    "height": 776
+  },
+  "DPR": 1.25,
+  "mapRenderDPR": 1,
+  "device": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "hardwareConcurrency": 12,
+    "maxTouchPoints": 0
+  },
+  "frontCount": 2,
+  "activeCombatFrames": 600,
+  "multiFrontFrames": 600,
+  "activeCombatCoverage": 1,
+  "hiddenFrames": 0,
+  "sampleValid": true,
+  "invalidReasons": [],
+  "cameraPosition": {
+    "x": -2664,
+    "y": -230
+  },
+  "visibleWorldFraction": 1,
+  "politicalDirtyPixelsPerFrame": 219.76,
+  "systemTimings": {
+    "politicalDirty": {
+      "count": 600,
+      "totalMs": 102.7,
+      "maxMs": 5.8
+    },
+    "politicalColorFlush": {
+      "count": 600,
+      "totalMs": 17.2,
+      "maxMs": 0.8
+    },
+    "politicalOwnerFlush": {
+      "count": 600,
+      "totalMs": 4,
+      "maxMs": 0.1
+    },
+    "terrain": {
+      "count": 600,
+      "totalMs": 6.6,
+      "maxMs": 0.5
+    },
+    "borders": {
+      "count": 600,
+      "totalMs": 131.4,
+      "maxMs": 7.7
+    },
+    "war": {
+      "count": 600,
+      "totalMs": 70.2,
+      "maxMs": 4.5
+    },
+    "capitals": {
+      "count": 600,
+      "totalMs": 15.8,
+      "maxMs": 0.9
+    }
+  },
+  "gpu": {
+    "webglVersion": "WebGL 2.0 (OpenGL ES 3.0 Chromium)",
+    "vendor": "Google Inc. (Intel)",
+    "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A68) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+  },
+  "authoritativeOperations": {
+    "before": [
+      {
+        "id": 10,
+        "active": true,
+        "captured": 16,
+        "casualties": 14.138654225618106,
+        "source": 52514,
+        "target": 52515
+      },
+      {
+        "id": 12,
+        "active": true,
+        "captured": 8,
+        "casualties": 13.72292876091832,
+        "source": 52505,
+        "target": 52504
+      },
+      {
+        "id": 13,
+        "active": false,
+        "captured": 1,
+        "casualties": 3.7254685359308977,
+        "source": 50470,
+        "target": 51494
+      }
+    ],
+    "after": [
+      {
+        "id": 10,
+        "active": true,
+        "captured": 27,
+        "casualties": 24.622637891313254,
+        "source": 52514,
+        "target": 52515
+      },
+      {
+        "id": 12,
+        "active": true,
+        "captured": 16,
+        "casualties": 24.356723196554416,
+        "source": 52505,
+        "target": 52504
+      },
+      {
+        "id": 13,
+        "active": false,
+        "captured": 1,
+        "casualties": 3.7254685359308977,
+        "source": 50470,
+        "target": 51494
+      }
+    ]
+  }
+}
