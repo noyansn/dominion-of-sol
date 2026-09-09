@@ -57,9 +57,9 @@ export class VisualGameplayMapping {
   cellAtPixel(x: number, y: number): number {
     if (x < 0 || y < 0 || x >= this.maskWidth || y >= this.maskHeight) return -1;
     const pixel = y * this.maskWidth + x;
-    if (this.mask[pixel] < 128) return -1;
     const direct = this.coarse(pixel);
     if (this.terrains[direct] === 0) return direct;
+    if (this.mask[pixel] < 128) return -1;
     const cached = this.coast.get(pixel);
     if (cached !== undefined) return cached;
 

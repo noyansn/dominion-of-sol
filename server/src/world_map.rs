@@ -19,7 +19,11 @@ pub fn cell_to_chunk(cell_idx: usize) -> usize {
 }
 
 pub fn generate_world_land_mask() -> Vec<u8> {
-    let candidates = ["assets/world_grid.bin", "server/assets/world_grid.bin", "../assets/world_grid.bin"];
+    let candidates = [
+        "assets/world_grid.bin",
+        "server/assets/world_grid.bin",
+        "../assets/world_grid.bin",
+    ];
     let found_path = candidates.iter().map(Path::new).find(|p| p.exists());
 
     if let Some(path) = found_path {

@@ -25,13 +25,13 @@ pub mod world_map;
 #[path = "../world_topology.rs"]
 pub mod world_topology;
 
-use world_map::WORLD_WIDTH;
 use protocol::{MatchStateInfo, ServerMessage};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use simulation::Simulation;
 use std::fs;
 use std::time::Instant;
+use world_map::WORLD_WIDTH;
 
 #[derive(Debug, Clone, Copy)]
 enum WorkloadScenario {
@@ -145,10 +145,15 @@ fn run_benchmark_run(
             let msg = ServerMessage::CellDeltaBatch {
                 tick: sim.tick,
                 sequence: sim.sequence,
+                ownership_revision: sim.sequence,
                 deltas: pending_deltas.clone(),
                 fronts: vec![],
                 match_state: MatchStateInfo::new(
-                    if sim.match_over { "FINISHED" } else { "RUNNING" },
+                    if sim.match_over {
+                        "FINISHED"
+                    } else {
+                        "RUNNING"
+                    },
                     sim.winner_faction_id,
                 ),
                 pending_alliances: vec![],

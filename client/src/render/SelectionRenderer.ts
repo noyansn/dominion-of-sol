@@ -250,7 +250,7 @@ export class SelectionRenderer {
 
     if (target !== null) {
       const action = gameState.selectionContext?.action;
-      const isActionable = action === 'LAUNCH_OFFENSIVE' || action === 'EXPAND_FRONTIER' || action === 'DEFEND' || action === 'BUILD_PORT';
+      const isActionable = action === 'LAUNCH_OFFENSIVE' || action === 'NEUTRAL_EXPANSION' || action === 'DEFEND' || action === 'BUILD_PORT';
       const cw = cellToWorld(target);
       const p = this.toScreen(cw.x, cw.y);
       if (p && isActionable) {
@@ -267,8 +267,8 @@ export class SelectionRenderer {
     if (source !== null && target !== null) {
       const action = gameState.selectionContext?.action;
       const isOffensive = action === 'LAUNCH_OFFENSIVE';
-      const isNeutralFocus = action === 'EXPAND_FRONTIER' && gameState.operationMode === 'FOCUS';
-      const isNeutralFrontier = action === 'EXPAND_FRONTIER' && gameState.operationMode === 'FRONTIER';
+      const isNeutralFocus = action === 'NEUTRAL_EXPANSION' && gameState.operationMode === 'FOCUS';
+      const isNeutralFrontier = action === 'NEUTRAL_EXPANSION' && gameState.operationMode === 'FRONTIER';
 
       if (isOffensive || isNeutralFocus || isNeutralFrontier) {
         const sw = cellToWorld(source);
@@ -398,4 +398,3 @@ export class SelectionRenderer {
     }
   }
 }
-

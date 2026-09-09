@@ -18,16 +18,16 @@
           <strong id="player-faction-name">Dominion of Sol</strong>
         </div>
         <span class="command-rule" aria-hidden="true"></span>
-        <div class="resource-module resource-module--population" title="Uncommitted Population. Deployed people remain living and return when operations end.">
+        <div class="resource-module resource-module--population" title="Uncommitted Population and sustainable growth rate">
           <span class="resource-label">POPULATION</span>
-          <strong id="player-population">—</strong>
+          <div class="population-primary-group">
+            <strong id="player-population">—</strong>
+            <span id="player-growth" class="population-growth-rate">+0.0/s</span>
+          </div>
           <span class="resource-bar" aria-hidden="true"><i id="player-population-bar"></i></span>
         </div>
-        <div class="resource-module player-extra" title="Server-authoritative reinforcement rate">
-          <span class="resource-label">GROWTH</span>
-          <strong id="player-growth">+0.0/s</strong>
-        </div>
-        <div class="resource-module player-extra">
+        <span class="command-rule" aria-hidden="true"></span>
+        <div class="resource-module player-extra resource-module--land">
           <span class="resource-label">LAND AREA</span>
           <strong id="player-territory-count">0</strong>
         </div>

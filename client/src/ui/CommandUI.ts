@@ -400,7 +400,7 @@ export class CommandUI {
         : gameState.matchState.phase === 'RUNNING' ? 'ACTIVE' : 'STANDBY',
     );
     if (expandButton) {
-      expandButton.style.display = context?.action === 'EXPAND_FRONTIER' && state !== 'MATCH_ENDED' && state !== 'MATCH_WON' ? '' : 'none';
+      expandButton.style.display = context?.action === 'NEUTRAL_EXPANSION' && state !== 'MATCH_ENDED' && state !== 'MATCH_WON' ? '' : 'none';
       expandButton.disabled = !expansion.legal;
     }
     if (defenseButton) {
@@ -467,7 +467,9 @@ export class CommandUI {
           ? 'Your faction has been defeated.'
           : context?.rejectionReason ?? (context?.action === 'LAUNCH_OFFENSIVE'
             ? 'Point confirmed. Choose Population deployment and launch the operation.'
-            : context?.action === 'EXPAND_FRONTIER'
+            : context?.action === 'AMPHIBIOUS_COLONIZATION'
+              ? 'Meaningful neutral coast selected. Double-click to spend Population from the completed port.'
+            : context?.action === 'NEUTRAL_EXPANSION'
               ? 'Neutral frontier selected. Commit Population to expand.'
               : context?.action === 'DEFEND'
                 ? 'Own frontier selected. Pre-position Population here.'

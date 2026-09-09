@@ -9,6 +9,8 @@
     "test:political": "esbuild src/render/PoliticalFieldCore.ts --bundle --platform=node --format=esm --outfile=.test-build/PoliticalFieldCore.mjs && node tests/political-field.test.mjs",
     "test:political-world": "esbuild src/render/PoliticalFieldCore.ts --bundle --platform=node --format=esm --outfile=.test-build/PoliticalFieldCore.mjs && node tests/political-field-world.test.mjs",
     "test:political-transitions": "node tests/political_transitions.test.mjs",
+    "test:political-transition-quality": "node tests/political_transition_quality.test.mjs",
+    "test:focus-propagation-direction": "node tests/focus_propagation_direction.test.mjs",
     "test:presentation-a1": "node tests/political_presentation.test.mjs",
     "test:ui": "node tests/ui_state_structure.test.mjs",
     "test:dialog": "node tests/match_withdrawal_dialog.test.mjs",

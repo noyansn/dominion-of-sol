@@ -35,6 +35,16 @@ name = "balance_harness"
 path = "src/bin/balance_harness.rs"
 test = false
 
+[[bin]]
+name = "core_loop_audit"
+path = "src/bin/core_loop_audit.rs"
+test = false
+
+[[bin]]
+name = "geography_audit"
+path = "src/bin/geography_audit.rs"
+test = false
+
 [profile.dev]
 panic = "abort"
 

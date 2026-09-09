@@ -1,13 +1,14 @@
 use crate::simulation::{
-    MacroPhase, Simulation, EXPANSION_BASE_COST, EXPANSION_COST_PER_CELL, MIN_DEFENSE_FOCUS,
-    MIN_PATCH_SIZE,
+    MacroPhase, Simulation, EXPANSION_BASE_COST, EXPANSION_COST_PER_CELL, MIN_PATCH_SIZE,
 };
 use crate::world_map::WORLD_WIDTH;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 const DECISION_INTERVAL_TICKS: u64 = 15;
 const MAX_BOT_TERRITORY_SCAN: usize = 4096;
+const MILITARY_COMMIT_COOLDOWN_TICKS: u64 = 300; // 15 seconds at 20 Hz
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BotStrategicState {
@@ -68,8 +69,8 @@ impl BotPersonality {
 pub enum BotExpansionArchetype {
     CompactRadial,   // ~35% of civs: prefers FRONTIER mode (organic round blob)
     DirectionalLobe, // ~30% of civs: prefers FOCUS mode with focused wedge
-    MultiAxis,       // ~20% of civs: rotates expansion heading periodically across different sectors
-    Opportunistic,   // ~15% of civs: expands into open neutral territory or follows coasts
+    MultiAxis, // ~20% of civs: rotates expansion heading periodically across different sectors
+    Opportunistic, // ~15% of civs: expands into open neutral territory or follows coasts
 }
 
 impl BotExpansionArchetype {
@@ -95,6 +96,7 @@ pub struct BotBrain {
     pub personality: BotPersonality,
     pub archetype: BotExpansionArchetype,
     pub frontier_seeds: Vec<u32>,
+    pub last_military_commit_tick: u64,
 }
 
 pub const BOT_REACTION_GLOBAL_COOLDOWN_TICKS: u64 = 180; // ~9.0 seconds at 20 Hz
@@ -122,6 +124,8 @@ pub struct BotManager {
     pub bot_reaction_count: u64,
     pub bot_premium_reaction_count: u64,
     pub pending_reactions: Vec<PendingBotReaction>,
+    pub profile_target_scan_ns: u128,
+    pub profile_target_scan_calls: u64,
 }
 
 impl BotManager {
@@ -142,6 +146,8 @@ impl BotManager {
             bot_reaction_count: 0,
             bot_premium_reaction_count: 0,
             pending_reactions: Vec::new(),
+            profile_target_scan_ns: 0,
+            profile_target_scan_calls: 0,
         }
     }
 
@@ -190,7 +196,8 @@ impl BotManager {
                 "maya" => "reaction_maya_glyph",
                 "lakota" => "reaction_lakota_fourwinds",
                 _ => "reaction_roma_triumph",
-            }.to_string()
+            }
+            .to_string()
         } else {
             // Free classic reactions (👍, 😂, 😮, 😢, 😡, 👏, 👀, 😎)
             match context {
@@ -263,7 +270,12 @@ impl BotManager {
                 }
                 "CAPITAL_SECURED" => {
                     if let Some(fid) = note.faction_id {
-                        self.emit_contextual_reaction(sim, fid, "CAPITAL_CAPTURED", note.cell_index);
+                        self.emit_contextual_reaction(
+                            sim,
+                            fid,
+                            "CAPITAL_CAPTURED",
+                            note.cell_index,
+                        );
                     }
                 }
                 "STATE_COLLAPSED" => {
@@ -273,12 +285,22 @@ impl BotManager {
                 }
                 "THE_FRONTIER_CLOSES" => {
                     if let Some(&first_bot) = bot_ids.first() {
-                        self.emit_contextual_reaction(sim, first_bot, "FRONTIER_CLOSED", note.cell_index);
+                        self.emit_contextual_reaction(
+                            sim,
+                            first_bot,
+                            "FRONTIER_CLOSED",
+                            note.cell_index,
+                        );
                     }
                 }
                 "WAR_ERA_BEGINS" => {
                     if let Some(&chosen_bot) = bot_ids.get(1).or_else(|| bot_ids.first()) {
-                        self.emit_contextual_reaction(sim, chosen_bot, "WAR_START", note.cell_index);
+                        self.emit_contextual_reaction(
+                            sim,
+                            chosen_bot,
+                            "WAR_START",
+                            note.cell_index,
+                        );
                     }
                 }
                 _ => {}
@@ -290,7 +312,14 @@ impl BotManager {
                 continue;
             }
 
-            let (own_population, territory_count, overextension, consolidation, doctrine_exp, defense_doc) = {
+            let (
+                own_population,
+                territory_count,
+                overextension,
+                consolidation,
+                doctrine_exp,
+                defense_doc,
+            ) = {
                 let Some(f) = sim.factions.iter().find(|f| f.faction_id == bot_id) else {
                     continue;
                 };
@@ -319,9 +348,26 @@ impl BotManager {
                 personality: BotPersonality::for_bot(bot_seed, bot_id),
                 archetype: BotExpansionArchetype::for_bot(bot_seed, bot_id),
                 frontier_seeds: Vec::new(),
+                last_military_commit_tick: 0,
             });
             brain.state_ticks += 1;
 
+            let active_local_front = sim.combat_manager.fronts.iter().find_map(|front| {
+                if !front.is_combat_active
+                    || front.operation_kind == "CONTACT"
+                    || (front.faction_a != bot_id && front.faction_b != bot_id)
+                {
+                    return None;
+                }
+                let own_pressure = if front.faction_a == bot_id {
+                    front.pressure
+                } else {
+                    -front.pressure
+                };
+                Some((front.front_id, own_pressure))
+            });
+
+            let target_scan_started = Instant::now();
             let targets = scan_targets(
                 sim,
                 bot_id,
@@ -331,18 +377,19 @@ impl BotManager {
                 brain.consecutive_expansion_orders,
                 &brain.frontier_seeds,
             );
+            self.profile_target_scan_ns += target_scan_started.elapsed().as_nanos();
+            self.profile_target_scan_calls += 1;
 
             // Update Strategic State Machine
             match sim.macro_phase {
                 MacroPhase::ExpansionEra => {
                     if territory_count <= 8 || sim.tick < 20 {
                         brain.state = BotStrategicState::Founding;
-                    } else if brain.consecutive_expansion_orders >= 4
-                        || overextension > 0.45
-                        || consolidation < 0.35
-                        || own_population < 2_500.0
-                    {
-                        brain.state = BotStrategicState::Consolidating;
+                    } else if targets.has_adjacent_enemy && active_local_front.is_none() {
+                        // First physical contact should become one readable
+                        // local war promptly; later decisions may expand on
+                        // other neutral edges while that front remains active.
+                        brain.state = BotStrategicState::BorderContact;
                     } else if brain.state == BotStrategicState::Consolidating {
                         if consolidation >= 0.50
                             && own_population >= 3_500.0
@@ -352,8 +399,13 @@ impl BotManager {
                             brain.consecutive_expansion_orders = 0;
                             brain.consecutive_pauses = 0;
                         }
-                    } else if targets.has_adjacent_enemy {
-                        brain.state = BotStrategicState::BorderContact;
+                    } else if brain.consecutive_expansion_orders >= 4
+                        || overextension > 0.45
+                        || consolidation < 0.35
+                        || own_population < 2_500.0
+                    {
+                        brain.state = BotStrategicState::Consolidating;
+                        brain.consecutive_pauses = 0;
                     } else {
                         brain.state = BotStrategicState::Expanding;
                     }
@@ -363,13 +415,27 @@ impl BotManager {
                 }
                 MacroPhase::WarEra | MacroPhase::Endgame => {
                     let under_attack = sim.combat_manager.fronts.iter().any(|fr| {
-                        fr.is_combat_active
-                            && fr.attacker_faction != bot_id
-                            && (fr.faction_a == bot_id || fr.faction_b == bot_id)
+                        if !fr.is_combat_active {
+                            return false;
+                        }
+                        let own_pressure = if fr.faction_a == bot_id {
+                            fr.pressure
+                        } else if fr.faction_b == bot_id {
+                            -fr.pressure
+                        } else {
+                            return false;
+                        };
+                        own_pressure < -0.12
                     });
-                    let own_offensives = sim.combat_manager.fronts.iter().filter(|fr| {
-                        fr.is_combat_active && fr.attacker_faction == bot_id
-                    }).count();
+                    let own_offensives = sim
+                        .combat_manager
+                        .fronts
+                        .iter()
+                        .filter(|fr| {
+                            fr.is_combat_active
+                                && (fr.faction_a == bot_id || fr.faction_b == bot_id)
+                        })
+                        .count();
 
                     if territory_count <= 3 || own_population < 1_500.0 {
                         brain.state = BotStrategicState::Desperate;
@@ -391,13 +457,23 @@ impl BotManager {
             match sim.macro_phase {
                 MacroPhase::ExpansionEra => {
                     // Maritime infrastructure
-                    if sim.tick % 200 == (bot_id as u64 % 200) && own_population >= crate::simulation::PORT_POPULATION_COST {
-                        if let Some(port_cell) = sim.strategic_sites.iter().find(|site| {
-                            site.kind == "PORT"
-                                && sim.cells[site.cell_a as usize].owner_id == bot_id
-                                && !sim.built_ports.contains(&site.cell_a)
-                                && !sim.port_constructions.iter().any(|port| port.cell_index == site.cell_a)
-                        }).map(|site| site.cell_a) {
+                    if sim.tick % 200 == (bot_id as u64 % 200)
+                        && own_population >= crate::simulation::PORT_POPULATION_COST
+                    {
+                        if let Some(port_cell) = sim
+                            .strategic_sites
+                            .iter()
+                            .find(|site| {
+                                site.kind == "PORT"
+                                    && sim.cells[site.cell_a as usize].owner_id == bot_id
+                                    && !sim.built_ports.contains(&site.cell_a)
+                                    && !sim
+                                        .port_constructions
+                                        .iter()
+                                        .any(|port| port.cell_index == site.cell_a)
+                            })
+                            .map(|site| site.cell_a)
+                        {
                             self.attempts += 1;
                             if sim.build_port(bot_id, port_cell).is_ok() {
                                 self.accepted += 1;
@@ -412,8 +488,65 @@ impl BotManager {
                         continue;
                     }
 
+                    // An existing local war must not consume every later AI
+                    // decision while most of the world is still neutral. A
+                    // losing side may answer that same front, then resumes
+                    // ordinary frontier decisions on following cycles.
+                    let losing_front_id =
+                        active_local_front.and_then(|(front_id, own_pressure)| {
+                            (own_pressure < -0.25).then_some(front_id)
+                        });
+                    if let Some(front_id) = losing_front_id {
+                        if own_population >= 1_500.0
+                            && sim.tick
+                                >= brain
+                                    .last_military_commit_tick
+                                    .saturating_add(MILITARY_COMMIT_COOLDOWN_TICKS)
+                            && sim.reinforce_front(bot_id, front_id, 0.12).is_ok()
+                        {
+                            brain.last_military_commit_tick = sim.tick;
+                            continue;
+                        }
+                    }
+
+                    // A real local border contact can begin war for AI and
+                    // human factions alike. The commitment stays moderate;
+                    // contact does not justify dumping the whole population.
+                    if brain.state == BotStrategicState::BorderContact
+                        && own_population >= 1_500.0
+                        && sim.tick
+                            >= brain
+                                .last_military_commit_tick
+                                .saturating_add(MILITARY_COMMIT_COOLDOWN_TICKS)
+                    {
+                        if let Some((_, source, enemy_target, intent_target)) = targets.war_target {
+                            let commit =
+                                (0.16 + brain.personality.aggression * 0.08).clamp(0.14, 0.24);
+                            self.attempts += 1;
+                            if sim
+                                .process_attack_command_with_intent(
+                                    bot_id,
+                                    source,
+                                    enemy_target,
+                                    Some(intent_target),
+                                    commit,
+                                )
+                                .is_ok()
+                            {
+                                self.accepted += 1;
+                                brain.last_military_commit_tick = sim.tick;
+                                brain.frontier_seeds.push(enemy_target);
+                                if brain.frontier_seeds.len() > 16 {
+                                    brain.frontier_seeds.remove(0);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // Expanding: evaluate neutral objective
-                    let required_reserve = EXPANSION_BASE_COST + EXPANSION_COST_PER_CELL * MIN_PATCH_SIZE as f64;
+                    let required_reserve =
+                        EXPANSION_BASE_COST + EXPANSION_COST_PER_CELL * MIN_PATCH_SIZE as f64;
                     if own_population < required_reserve {
                         self.insufficient += 1;
                         continue;
@@ -443,19 +576,39 @@ impl BotManager {
                                 }
                             }
                             BotExpansionArchetype::Opportunistic => {
-                                if doctrine_exp > 0.01 { "FOCUS" } else { "FRONTIER" }
+                                if doctrine_exp > 0.01 {
+                                    "FOCUS"
+                                } else {
+                                    "FRONTIER"
+                                }
                             }
                         };
 
                         let commit_ratio = match brain.archetype {
-                            BotExpansionArchetype::CompactRadial => (0.10 + brain.personality.frontier_appetite * 0.04).clamp(0.08, 0.14),
-                            BotExpansionArchetype::DirectionalLobe => (0.12 + brain.personality.aggression * 0.05).clamp(0.09, 0.16),
-                            BotExpansionArchetype::MultiAxis => (0.11 + brain.personality.risk_tolerance * 0.04).clamp(0.08, 0.15),
-                            BotExpansionArchetype::Opportunistic => (0.10 + brain.personality.patience * 0.04).clamp(0.08, 0.14),
+                            BotExpansionArchetype::CompactRadial => (0.10
+                                + brain.personality.frontier_appetite * 0.04)
+                                .clamp(0.08, 0.14),
+                            BotExpansionArchetype::DirectionalLobe => {
+                                (0.12 + brain.personality.aggression * 0.05).clamp(0.09, 0.16)
+                            }
+                            BotExpansionArchetype::MultiAxis => {
+                                (0.11 + brain.personality.risk_tolerance * 0.04).clamp(0.08, 0.15)
+                            }
+                            BotExpansionArchetype::Opportunistic => {
+                                (0.10 + brain.personality.patience * 0.04).clamp(0.08, 0.14)
+                            }
                         };
 
                         self.attempts += 1;
-                        if sim.process_expand_command_with_mode(bot_id, target, mode, Some(commit_ratio)).is_ok() {
+                        if sim
+                            .process_expand_command_with_mode(
+                                bot_id,
+                                target,
+                                mode,
+                                Some(commit_ratio),
+                            )
+                            .is_ok()
+                        {
                             self.accepted += 1;
                             brain.consecutive_expansion_orders += 1;
                             brain.frontier_seeds.push(target);
@@ -466,52 +619,117 @@ impl BotManager {
                     }
                 }
                 MacroPhase::FinalFrontier => {
-                    // Armistice: defensive positioning and port building only
-                    if sim.tick % 100 == (bot_id as u64 % 100) && own_population >= 1_000.0 {
-                        if let Some(cap) = sim.factions.iter().find(|f| f.faction_id == bot_id).map(|f| f.capital_cell) {
-                            let _ = sim.set_defense_focus(bot_id, cap, (own_population * 0.10).max(MIN_DEFENSE_FOCUS));
-                        }
-                    }
+                    // Armistice is a short readable pause, not a hidden
+                    // population sink. Local defensive commitments are made
+                    // only when an actual contested front exists.
+                    brain.consecutive_pauses += 1;
                 }
                 MacroPhase::WarEra | MacroPhase::Endgame => {
                     // 1. Operation Abort / Retreat: cancel failing or severed offensives
-                    let failing_front_id = sim.combat_manager.fronts.iter().find(|fr| {
-                        fr.is_combat_active
-                            && fr.attacker_faction == bot_id
-                            && (fr.cohesion < 0.30
-                                || fr.supply_efficiency < 0.35
-                                || (fr.casualties > 3_500.0 && fr.pressure < -0.40))
-                    }).map(|fr| fr.front_id);
+                    let failing_front_id = sim
+                        .combat_manager
+                        .fronts
+                        .iter()
+                        .find(|fr| {
+                            if !fr.is_combat_active {
+                                return false;
+                            }
+                            let own_pressure = if fr.faction_a == bot_id {
+                                fr.pressure
+                            } else if fr.faction_b == bot_id {
+                                -fr.pressure
+                            } else {
+                                return false;
+                            };
+                            fr.cohesion < 0.25
+                                || fr.supply_efficiency < 0.30
+                                || (fr.casualties > 3_500.0 && own_pressure < -0.40)
+                        })
+                        .map(|fr| fr.front_id);
 
                     if let Some(fid) = failing_front_id {
                         let _ = sim.cancel_attack(bot_id, fid);
                     }
 
                     // 2. Reinforcement of winning fronts
-                    let winning_front_id = sim.combat_manager.fronts.iter().find(|fr| {
-                        fr.is_combat_active
-                            && fr.attacker_faction == bot_id
-                            && fr.pressure > 0.35
-                            && fr.cohesion > 0.60
-                    }).map(|fr| fr.front_id);
+                    let winning_front_id = sim
+                        .combat_manager
+                        .fronts
+                        .iter()
+                        .find(|fr| {
+                            if !fr.is_combat_active || fr.cohesion <= 0.60 {
+                                return false;
+                            }
+                            let own_pressure = if fr.faction_a == bot_id {
+                                fr.pressure
+                            } else if fr.faction_b == bot_id {
+                                -fr.pressure
+                            } else {
+                                return false;
+                            };
+                            own_pressure > 0.30
+                        })
+                        .map(|fr| fr.front_id);
 
                     if let Some(w_fid) = winning_front_id {
-                        if own_population >= 3_000.0 {
-                            let _ = sim.reinforce_front(bot_id, w_fid, 0.20);
+                        if own_population >= 3_000.0
+                            && sim.tick
+                                >= brain
+                                    .last_military_commit_tick
+                                    .saturating_add(MILITARY_COMMIT_COOLDOWN_TICKS)
+                        {
+                            if sim.reinforce_front(bot_id, w_fid, 0.14).is_ok() {
+                                brain.last_military_commit_tick = sim.tick;
+                            }
                         }
                     }
 
                     // 3. Defensive focus if under attack
-                    if brain.state == BotStrategicState::Defending || brain.state == BotStrategicState::Desperate {
-                        if let Some(cap) = sim.factions.iter().find(|f| f.faction_id == bot_id).map(|f| f.capital_cell) {
-                            let _ = sim.set_defense_focus(bot_id, cap, (own_population * 0.15).max(MIN_DEFENSE_FOCUS));
+                    if brain.state == BotStrategicState::Defending
+                        || brain.state == BotStrategicState::Desperate
+                    {
+                        let threatened_front = sim
+                            .combat_manager
+                            .fronts
+                            .iter()
+                            .find(|fr| {
+                                if !fr.is_combat_active {
+                                    return false;
+                                }
+                                let own_pressure = if fr.faction_a == bot_id {
+                                    fr.pressure
+                                } else if fr.faction_b == bot_id {
+                                    -fr.pressure
+                                } else {
+                                    return false;
+                                };
+                                own_pressure < 0.0
+                            })
+                            .map(|fr| fr.front_id);
+                        if let Some(front_id) = threatened_front {
+                            if own_population >= 1_500.0
+                                && sim.tick
+                                    >= brain
+                                        .last_military_commit_tick
+                                        .saturating_add(MILITARY_COMMIT_COOLDOWN_TICKS)
+                            {
+                                if sim.reinforce_front(bot_id, front_id, 0.14).is_ok() {
+                                    brain.last_military_commit_tick = sim.tick;
+                                }
+                            }
                         }
                     }
 
                     // 4. Strategic Utility Decision: War vs Neutral Colonization vs Consolidation
-                    let own_offensives = sim.combat_manager.fronts.iter().filter(|fr| {
-                        fr.is_combat_active && fr.attacker_faction == bot_id
-                    }).count();
+                    let own_offensives = sim
+                        .combat_manager
+                        .fronts
+                        .iter()
+                        .filter(|fr| {
+                            fr.is_combat_active
+                                && (fr.faction_a == bot_id || fr.faction_b == bot_id)
+                        })
+                        .count();
 
                     let war_option = targets.war_target;
                     let neutral_target = targets.neutral_target;
@@ -536,8 +754,50 @@ impl BotManager {
                         + defense_doc * 2.0
                         + brain.personality.patience * 2.0;
 
+                    // A civilization already contesting one local front may
+                    // still use a different legal neutral frontier. This
+                    // keeps remote neutral geography filling during the war
+                    // era without creating extra global wars or free land.
+                    if own_offensives <= 1
+                        && brain.state != BotStrategicState::Defending
+                        && own_population >= 1_500.0
+                    {
+                        if let Some(target) = neutral_target {
+                            let commit_ratio = (0.10 + brain.personality.frontier_appetite * 0.04)
+                                .clamp(0.08, 0.14);
+                            let mode = match brain.archetype {
+                                BotExpansionArchetype::DirectionalLobe => "FOCUS",
+                                BotExpansionArchetype::MultiAxis
+                                    if brain.consecutive_expansion_orders % 2 == 0 =>
+                                {
+                                    "FOCUS"
+                                }
+                                _ => "FRONTIER",
+                            };
+                            self.attempts += 1;
+                            if sim
+                                .process_expand_command_with_mode(
+                                    bot_id,
+                                    target,
+                                    mode,
+                                    Some(commit_ratio),
+                                )
+                                .is_ok()
+                            {
+                                self.accepted += 1;
+                                brain.consecutive_expansion_orders += 1;
+                                brain.frontier_seeds.push(target);
+                                if brain.frontier_seeds.len() > 16 {
+                                    brain.frontier_seeds.remove(0);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // If consolidation is paramount and bot has high overextension, entrench/pause
-                    if consolidation_utility > 2.5 && (overextension > 0.45 || consolidation < 0.30) {
+                    if consolidation_utility > 2.5 && (overextension > 0.45 || consolidation < 0.30)
+                    {
                         brain.consecutive_pauses += 1;
                         continue;
                     }
@@ -545,23 +805,46 @@ impl BotManager {
                     let min_attack_pop = if defense_doc > 0.02 { 2_200.0 } else { 1_200.0 };
 
                     // Compare War Utility vs Neutral Expansion Utility
-                    if war_utility >= neutral_utility && war_utility > 0.65 && own_offensives < 2 && own_population >= min_attack_pop {
+                    if war_utility >= neutral_utility
+                        && war_utility > 0.65
+                        && own_offensives < 2
+                        && own_population >= min_attack_pop
+                        && sim.tick
+                            >= brain
+                                .last_military_commit_tick
+                                .saturating_add(MILITARY_COMMIT_COOLDOWN_TICKS)
+                    {
                         if let Some((_, source, enemy_target, intent_target)) = war_option {
                             let enemy_id = sim.cells[enemy_target as usize].owner_id;
-                            let enemy_pop = sim.factions.iter().find(|f| f.faction_id == enemy_id).map(|f| f.population).unwrap_or(10.0);
+                            let enemy_pop = sim
+                                .factions
+                                .iter()
+                                .find(|f| f.faction_id == enemy_id)
+                                .map(|f| f.population)
+                                .unwrap_or(10.0);
                             let rel_pop = own_population / enemy_pop.max(1.0);
 
                             let commit = if rel_pop > 1.8 {
-                                0.60
+                                0.30
                             } else if rel_pop > 1.2 {
-                                0.45
+                                0.24
                             } else {
-                                0.35
+                                0.18
                             };
 
                             self.attempts += 1;
-                            if sim.process_attack_command_with_intent(bot_id, source, enemy_target, Some(intent_target), commit).is_ok() {
+                            if sim
+                                .process_attack_command_with_intent(
+                                    bot_id,
+                                    source,
+                                    enemy_target,
+                                    Some(intent_target),
+                                    commit,
+                                )
+                                .is_ok()
+                            {
                                 self.accepted += 1;
+                                brain.last_military_commit_tick = sim.tick;
                                 brain.frontier_seeds.push(enemy_target);
                                 if brain.frontier_seeds.len() > 16 {
                                     brain.frontier_seeds.remove(0);
@@ -570,9 +853,18 @@ impl BotManager {
                         }
                     } else if neutral_utility > 0.0 && own_population >= 1_000.0 {
                         if let Some(target) = neutral_target {
-                            let commit_ratio = (0.10 + brain.personality.frontier_appetite * 0.04).clamp(0.08, 0.14);
+                            let commit_ratio = (0.10 + brain.personality.frontier_appetite * 0.04)
+                                .clamp(0.08, 0.14);
                             self.attempts += 1;
-                            if sim.process_expand_command_with_mode(bot_id, target, "FRONTIER", Some(commit_ratio)).is_ok() {
+                            if sim
+                                .process_expand_command_with_mode(
+                                    bot_id,
+                                    target,
+                                    "FRONTIER",
+                                    Some(commit_ratio),
+                                )
+                                .is_ok()
+                            {
                                 self.accepted += 1;
                                 brain.consecutive_expansion_orders += 1;
                                 brain.frontier_seeds.push(target);
@@ -605,10 +897,18 @@ pub fn scan_targets(
     frontier_seeds: &[u32],
 ) -> ScannedTargets {
     let Some(f) = sim.factions.iter().find(|f| f.faction_id == bot_id) else {
-        return ScannedTargets { neutral_target: None, war_target: None, has_adjacent_enemy: false };
+        return ScannedTargets {
+            neutral_target: None,
+            war_target: None,
+            has_adjacent_enemy: false,
+        };
     };
     if f.is_eliminated || f.territory_count == 0 {
-        return ScannedTargets { neutral_target: None, war_target: None, has_adjacent_enemy: false };
+        return ScannedTargets {
+            neutral_target: None,
+            war_target: None,
+            has_adjacent_enemy: false,
+        };
     }
 
     let own_pop = f.population;
@@ -623,7 +923,10 @@ pub fn scan_targets(
     let candidate_frontier: Vec<usize> = if (bot_id as usize) < sim.faction_frontiers.len()
         && !sim.faction_frontiers[bot_id as usize].is_empty()
     {
-        sim.faction_frontiers[bot_id as usize].iter().map(|&idx| idx as usize).collect()
+        sim.faction_frontiers[bot_id as usize]
+            .iter()
+            .map(|&idx| idx as usize)
+            .collect()
     } else {
         let mut fallback = Vec::new();
         for &s in frontier_seeds.iter().rev() {
@@ -634,7 +937,11 @@ pub fn scan_targets(
         }
         if fallback.is_empty() {
             for (idx, cell) in sim.cells.iter().enumerate() {
-                if cell.owner_id == bot_id && Simulation::cardinal(idx).into_iter().any(|n| sim.cells[n].owner_id != bot_id) {
+                if cell.owner_id == bot_id
+                    && crate::expansion::legal_land_neighbors(&sim.cells, idx)
+                        .into_iter()
+                        .any(|n| sim.cells[n].owner_id != bot_id)
+                {
                     fallback.push(idx);
                 }
             }
@@ -651,7 +958,7 @@ pub fn scan_targets(
             continue;
         }
 
-        for n in Simulation::cardinal(i) {
+        for n in crate::expansion::legal_land_neighbors(&sim.cells, i) {
             let c = &sim.cells[n];
             if c.owner_id == 0 && c.terrain_type == 0 {
                 let nx = (n % WORLD_WIDTH) as f64;
@@ -674,7 +981,8 @@ pub fn scan_targets(
                     }
                     BotExpansionArchetype::DirectionalLobe => {
                         // Prefers expanding along its chosen primary heading (deterministic per bot)
-                        let primary_angle = (bot_id as f64 * 1.6180339887) % (2.0 * std::f64::consts::PI);
+                        let primary_angle =
+                            (bot_id as f64 * 1.6180339887) % (2.0 * std::f64::consts::PI);
                         let heading_x = primary_angle.cos();
                         let heading_y = primary_angle.sin();
                         let alignment = (dx * heading_x + dy * heading_y) / dist_from_cap.max(0.1);
@@ -683,17 +991,21 @@ pub fn scan_targets(
                     BotExpansionArchetype::MultiAxis => {
                         // Rotates preferred axis based on consecutive expansion orders
                         let axis_idx = consecutive_expansion_orders as usize % 4;
-                        let axis_angle = (axis_idx as f64 * std::f64::consts::FRAC_PI_2) + (bot_id as f64 * 0.7);
+                        let axis_angle =
+                            (axis_idx as f64 * std::f64::consts::FRAC_PI_2) + (bot_id as f64 * 0.7);
                         let heading_x = axis_angle.cos();
                         let heading_y = axis_angle.sin();
                         let alignment = (dx * heading_x + dy * heading_y) / dist_from_cap.max(0.1);
                         (-alignment * 450.0) as i32 + (bot_hash % 41) as i32
                     }
                     BotExpansionArchetype::Opportunistic => {
-                        let neutral_neighbors = Simulation::cardinal(n)
-                            .into_iter()
-                            .filter(|&adj| sim.cells[adj].owner_id == 0 && sim.cells[adj].terrain_type == 0)
-                            .count() as i32;
+                        let neutral_neighbors =
+                            crate::expansion::legal_land_neighbors(&sim.cells, n)
+                                .into_iter()
+                                .filter(|&adj| {
+                                    sim.cells[adj].owner_id == 0 && sim.cells[adj].terrain_type == 0
+                                })
+                                .count() as i32;
                         -neutral_neighbors * 150 + (bot_hash % 53) as i32
                     }
                 };
@@ -701,14 +1013,22 @@ pub fn scan_targets(
                 if best_neutral.is_none_or(|(best_score, _)| score < best_score) {
                     best_neutral = Some((score, n as u32));
                 }
-            } else if c.owner_id > 0 && c.owner_id != bot_id && c.terrain_type == 0 {
+            } else if c.owner_id > 0
+                && c.owner_id != bot_id
+                && c.terrain_type == 0
+                // Small-island topology only simplifies neutral expansion and
+                // sovereign connectivity. It never grants the AI a
+                // cross-water attack target.
+                && Simulation::cardinal(i).contains(&n)
+            {
                 let enemy_id = c.owner_id;
                 if sim.are_allied(bot_id, enemy_id) {
                     continue;
                 }
                 has_adjacent_enemy = true;
 
-                let Some(enemy_f) = sim.factions.iter().find(|fac| fac.faction_id == enemy_id) else {
+                let Some(enemy_f) = sim.factions.iter().find(|fac| fac.faction_id == enemy_id)
+                else {
                     continue;
                 };
                 if enemy_f.is_eliminated || enemy_f.territory_count == 0 {
@@ -720,8 +1040,13 @@ pub fn scan_targets(
                 let enemy_overextension = enemy_f.overextension_ratio as f64;
                 let enemy_consolidation = enemy_f.consolidation_ratio as f64;
 
-                let enemy_wars = sim.combat_manager.fronts.iter()
-                    .filter(|f| f.is_combat_active && (f.faction_a == enemy_id || f.faction_b == enemy_id))
+                let enemy_wars = sim
+                    .combat_manager
+                    .fronts
+                    .iter()
+                    .filter(|f| {
+                        f.is_combat_active && (f.faction_a == enemy_id || f.faction_b == enemy_id)
+                    })
                     .count() as f64;
 
                 let is_isolated = sim.cell_supply.get(n).copied().unwrap_or(1) == 0;
@@ -748,7 +1073,10 @@ pub fn scan_targets(
 
                 let required_threshold = (0.50 - own_offense * 2.0).max(0.20);
                 if pop_ratio >= required_threshold {
-                    if best_war.as_ref().map_or(true, |(best_score, _, _, _)| score > *best_score) {
+                    if best_war
+                        .as_ref()
+                        .map_or(true, |(best_score, _, _, _)| score > *best_score)
+                    {
                         best_war = Some((score, i as u32, n as u32, enemy_f.capital_cell));
                     }
                 }
@@ -821,7 +1149,9 @@ mod tests {
             sim.step_dt(0.05);
 
             if let Some(brain) = bot.brains.get(&2) {
-                if brain.state == BotStrategicState::Expanding || brain.state == BotStrategicState::Founding {
+                if brain.state == BotStrategicState::Expanding
+                    || brain.state == BotStrategicState::Founding
+                {
                     observed_expanding = true;
                 }
                 if brain.state == BotStrategicState::Consolidating {
@@ -830,9 +1160,18 @@ mod tests {
             }
         }
 
-        assert!(sim.factions[1].territory_count > initial_territory, "Bot must expand into neutral territory");
-        assert!(observed_expanding, "Bot must enter expanding/founding state");
-        assert!(observed_consolidating, "Bot must enter consolidating state to pause when overextended");
+        assert!(
+            sim.factions[1].territory_count > initial_territory,
+            "Bot must expand into neutral territory"
+        );
+        assert!(
+            observed_expanding,
+            "Bot must enter expanding/founding state"
+        );
+        assert!(
+            observed_consolidating,
+            "Bot must enter consolidating state to pause when overextended"
+        );
     }
 
     #[test]
@@ -886,28 +1225,65 @@ mod tests {
 
         // Bot 1 evaluates target
         let target_option = best_war_target(&sim, 2);
-        assert!(target_option.is_some(), "Bot 1 should find a valid war target");
+        assert!(
+            target_option.is_some(),
+            "Bot 1 should find a valid war target"
+        );
 
         // Target evaluation must be objective based on military metrics, not human prejudice
         let (_, _source, enemy_cell, _) = target_option.unwrap();
         let target_owner = sim.cells[enemy_cell as usize].owner_id;
-        assert!(target_owner == 1 || target_owner == 3, "Bot 1 attacks either neighbor based on geometry");
+        assert!(
+            target_owner == 1 || target_owner == 3,
+            "Bot 1 attacks either neighbor based on geometry"
+        );
 
         // Verify retreat logic: if attack is registered and cohesion degrades below 0.30, bot cancels attack
         let cm_id = sim.combat_manager.register_attack_operation_with_intent(
-            2, 3, (y * WORLD_WIDTH + 499) as u32, (y * WORLD_WIDTH + 500) as u32, (y * WORLD_WIDTH + 510) as u32,
-            0.0, 0.0, 1.0, 0.0, 1_000.0, 1_000.0, 0.0, sim.tick, "LAND_OFFENSIVE"
+            2,
+            3,
+            (y * WORLD_WIDTH + 499) as u32,
+            (y * WORLD_WIDTH + 500) as u32,
+            (y * WORLD_WIDTH + 510) as u32,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1_000.0,
+            1_000.0,
+            0.0,
+            sim.tick,
+            "LAND_OFFENSIVE",
         );
-        let front = sim.combat_manager.fronts.iter_mut().find(|fr| fr.front_id == cm_id).unwrap();
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter_mut()
+            .find(|fr| fr.front_id == cm_id)
+            .unwrap();
         front.cohesion = 0.20; // severely degraded cohesion
 
         let mut bot = BotManager::with_seed(1, 99);
         sim.tick = 28; // (28 + 2) % 15 == 0, triggering bot_id 2
         bot.generate_bot_actions(&mut sim);
 
-        let front_after = sim.combat_manager.fronts.iter().find(|fr| fr.front_id == cm_id).unwrap();
-        assert!(!front_after.is_combat_active, "Bot must cancel failing attack with collapsed cohesion");
-        assert_eq!(front_after.termination_reason, "CANCELLED");
+        let front_after = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|fr| fr.front_id == cm_id)
+            .unwrap();
+        assert!(
+            front_after.is_combat_active,
+            "the opponent's pressure must remain after the bot withdraws"
+        );
+        let bot_force = if front_after.faction_a == 2 {
+            front_after.deployed_population_a
+        } else {
+            front_after.deployed_population_b
+        };
+        assert!(bot_force.abs() < 0.01);
+        assert_eq!(front_after.attacker_faction, 3);
     }
 
     #[test]
@@ -948,7 +1324,11 @@ mod tests {
         }
 
         // 3. Premium civilization reactions must NOT be usable without entitlement
-        let premium_reactions = ["reaction_roma_aquila", "reaction_turk_standard", "reaction_pers_lion"];
+        let premium_reactions = [
+            "reaction_roma_aquila",
+            "reaction_turk_standard",
+            "reaction_pers_lion",
+        ];
         for prx in &premium_reactions {
             assert!(
                 !store.is_reaction_usable("", prx),
@@ -977,22 +1357,34 @@ mod tests {
         // 2. Immediate second reaction from ANY bot must be rejected by global cooldown (180 ticks = ~9s)
         sim.tick = 150; // only 50 ticks later
         let rejected_global = bot.emit_contextual_reaction(&sim, 3, "VICTORY", None);
-        assert!(!rejected_global, "Global cooldown of 180 ticks must reject spam across bots");
+        assert!(
+            !rejected_global,
+            "Global cooldown of 180 ticks must reject spam across bots"
+        );
 
         // 3. After global cooldown (sim.tick = 100 + 180 = 280), another bot CAN react
         sim.tick = 285;
         let emitted_other_bot = bot.emit_contextual_reaction(&sim, 3, "VICTORY", None);
-        assert!(emitted_other_bot, "Different bot can react once global cooldown elapses");
+        assert!(
+            emitted_other_bot,
+            "Different bot can react once global cooldown elapses"
+        );
 
         // 4. Same bot (bot_id = 2) must be rejected by per-bot cooldown (1800 ticks = 90s)
         sim.tick = 500; // global cooldown elapsed, but bot 2 only 400 ticks since last reaction
         let rejected_per_bot = bot.emit_contextual_reaction(&sim, 2, "DEFEAT", None);
-        assert!(!rejected_per_bot, "Per-bot cooldown of 1800 ticks must prevent bot spam");
+        assert!(
+            !rejected_per_bot,
+            "Per-bot cooldown of 1800 ticks must prevent bot spam"
+        );
 
         // 5. Drain reactions
         let drained = bot.drain_reactions();
         assert_eq!(drained.len(), 2);
-        assert!(bot.pending_reactions.is_empty(), "Drain must empty pending reaction queue");
+        assert!(
+            bot.pending_reactions.is_empty(),
+            "Drain must empty pending reaction queue"
+        );
 
         // 6. Test Exact 2% Rule across 100 emitted reactions
         let mut test_bot = BotManager::with_seed(1, 123);
@@ -1020,7 +1412,13 @@ mod tests {
 
         assert_eq!(test_bot.bot_reaction_count, 100);
         assert_eq!(test_bot.bot_premium_reaction_count, 2);
-        assert_eq!(premium_count, 2, "Exactly 2 out of 100 reactions (2%) must be premium civilization reactions");
-        assert_eq!(free_count, 98, "Exactly 98 out of 100 reactions (98%) must be free classic reactions");
+        assert_eq!(
+            premium_count, 2,
+            "Exactly 2 out of 100 reactions (2%) must be premium civilization reactions"
+        );
+        assert_eq!(
+            free_count, 98,
+            "Exactly 98 out of 100 reactions (98%) must be free classic reactions"
+        );
     }
 }

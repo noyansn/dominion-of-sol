@@ -209,6 +209,60 @@ button:focus-visible, input:focus-visible {
   gap: 1px;
 }
 
+.resource-module--population {
+  padding: 0 4px;
+}
+
+.population-primary-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+#player-population {
+  color: #ffffff;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-shadow: 0 0 16px rgba(255, 255, 255, 0.22);
+}
+
+.population-growth-rate,
+#player-growth {
+  color: #4ade80;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  background: rgba(74, 222, 128, 0.12);
+  border: 1px solid rgba(74, 222, 128, 0.28);
+  border-radius: 3px;
+  padding: 1px 5px;
+  line-height: 1.1;
+}
+
+.growth-land-limit {
+  font-size: 8.5px;
+  font-weight: 800;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.36);
+  border-radius: 2px;
+  padding: 1px 4px;
+  margin-left: 3px;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.resource-module--land strong {
+  color: #94a3b8;
+  font-size: 10.5px;
+}
+
 .resource-module strong {
   color: #f1f5f9;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;

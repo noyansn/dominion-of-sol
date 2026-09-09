@@ -2,9 +2,16 @@ export interface PerfTimingSummary {
   count: number;
   totalMs: number;
   maxMs: number;
+  avgMs?: number;
+  p95Ms?: number;
+  p99Ms?: number;
+  samples?: number[];
 }
 
-interface PerfAccumulator extends PerfTimingSummary {
+interface PerfAccumulator {
+  count: number;
+  totalMs: number;
+  maxMs: number;
   samples: number[];
 }
 
@@ -21,8 +28,20 @@ function accumulator(name: string): PerfAccumulator {
   return value;
 }
 
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const index = (sorted.length - 1) * p;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+}
+
 export function measureFrameSystem<T>(name: string, fn: () => T): T {
-  if (!(import.meta as any).env?.DEV) return fn();
+  if (!(import.meta as any).env?.DEV
+    || (typeof window !== 'undefined' && (window as any).__DOMINION_FRAME_PROFILING_ENABLED__ === false)) {
+    return fn();
+  }
   const startedAt = performance.now();
   try {
     return fn();
@@ -56,6 +75,10 @@ export function getFramePerfSnapshot() {
       count: value.count,
       totalMs: Number(value.totalMs.toFixed(2)),
       maxMs: Number(value.maxMs.toFixed(2)),
+      avgMs: Number((value.totalMs / Math.max(1, value.count)).toFixed(3)),
+      p95Ms: Number(percentile([...value.samples].sort((a, b) => a - b), 0.95).toFixed(3)),
+      p99Ms: Number(percentile([...value.samples].sort((a, b) => a - b), 0.99).toFixed(3)),
+      samples: [...value.samples],
     };
   }
   return {

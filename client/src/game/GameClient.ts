@@ -21,6 +21,8 @@ export interface NetTelemetry {
   snapshotOwnedCells: number;
   gameStateFactions: number;
   hudFactions: number;
+  ownershipRevisionGaps: number;
+  snapshotResyncRequests: number;
   lastError?: string;
 }
 
@@ -40,6 +42,8 @@ export const netTelemetry: NetTelemetry = {
   snapshotOwnedCells: 0,
   gameStateFactions: 0,
   hudFactions: 0,
+  ownershipRevisionGaps: 0,
+  snapshotResyncRequests: 0,
 };
 
 declare const __DOMINION_CLIENT_COMMIT__: string;
@@ -56,6 +60,7 @@ export const CLIENT_BUILD_ID = CLIENT_COMMIT;
 (window as any).__DOMINION_BUILD_TIMESTAMP__ = CLIENT_BUILD_TIMESTAMP;
 (window as any).__DOMINION_PROTOCOL_VERSION__ = CLIENT_PROTOCOL_VERSION;
 (window as any).__DEV_NET_TELEMETRY__ = netTelemetry;
+(window as any).__DOMINION_EXPANSION_PROGRESS__ = (window as any).__DOMINION_EXPANSION_PROGRESS__ || [];
 
 console.log('==================================================');
 console.log('CLIENT BUILD');
@@ -83,11 +88,47 @@ export class GameClient {
   public currentMatchId: string | null = null;
   public currentMatchPhase: string = 'WAITING';
   private reconnectTimer: number | undefined;
+  private awaitingOwnershipResync = false;
 
   constructor(url: string = `ws://${window.location.hostname || '127.0.0.1'}:8765`) {
     window.__GAME_CLIENT_INSTANCE_COUNT__ = (window.__GAME_CLIENT_INSTANCE_COUNT__ || 0) + 1;
     this.url = url;
     window.__DOMINION_GAME_CLIENT__ = this;
+    if (new URLSearchParams(window.location.search).get('acceptance') === 'resync') {
+      window.setTimeout(() => this.runAcceptanceRevisionGapTest(), 4500);
+    }
+  }
+
+  private runAcceptanceRevisionGapTest(attempt = 0): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !gameState.isInitialized) {
+      if (attempt < 30) window.setTimeout(() => this.runAcceptanceRevisionGapTest(attempt + 1), 500);
+      return;
+    }
+    const revisionN = gameState.ownershipRevision;
+    const telemetryBefore = netTelemetry.snapshotResyncRequests;
+    console.log(`[ACCEPTANCE RESYNC] receive revision N=${revisionN}; suppress revision N+1=${revisionN + 1}; receive revision N+2=${revisionN + 2}`);
+    this.handleMessage({
+      type: 'cell_delta_batch',
+      tick: gameState.tick,
+      sequence: gameState.sequence,
+      ownershipRevision: revisionN + 2,
+      deltas: [],
+      fronts: [],
+      matchState: gameState.matchState,
+      pendingAlliances: [],
+    } as any);
+
+    window.setTimeout(async () => {
+      const diagnostic = await this.queryDevDiagnostic();
+      const clientHash = gameState.ownerGridHash();
+      const serverHash = diagnostic.ownerGridHash || diagnostic.owner_grid_hash || 'missing';
+      console.log(
+        `[ACCEPTANCE RESYNC RESULT] gap detected=${netTelemetry.ownershipRevisionGaps > 0} ` +
+        `resync request count=${netTelemetry.snapshotResyncRequests - telemetryBefore} ` +
+        `snapshot revision=${gameState.ownershipRevision} server hash=${serverHash} ` +
+        `client hash=${clientHash} match=${serverHash === clientHash} diagnosticKeys=${Object.keys(diagnostic).join(',')}`,
+      );
+    }, 1200);
   }
 
   public sendPlayerReady(matchId?: string): void {
@@ -332,6 +373,7 @@ export class GameClient {
           }
         }
       } else if (msg.type === 'world_snapshot') {
+        this.awaitingOwnershipResync = false;
         netTelemetry.snapshotReceived = true;
         netTelemetry.snapshotFactions = msg.factions?.length || 0;
         
@@ -359,9 +401,37 @@ export class GameClient {
             (window as any).__DOMINION_MATCH_PHASE__ = ph;
           }
         }
+        // A snapshot is only sent after the authoritative join/resume path.
+        // Reassert the gameplay surface here so reconnects cannot leave the
+        // command HUD visible while input remains gated as HOME_STATE.
+        const civSelector = (window as any).__DOMINION_CIVILIZATION_SELECTOR__;
+        if (civSelector?.setProductMode) {
+          civSelector.setProductMode('MATCH_ACTIVE');
+        } else {
+          uiStateManager.setState('IN_GAME_STATE');
+        }
         netTelemetry.gameStateFactions = gameState.factions.size;
         netTelemetry.hudFactions = gameState.factions.size;
+        (window as any).__DOMINION_OWNERSHIP_SYNC__ = {
+          status: 'MATCHED',
+          ownershipRevision: gameState.ownershipRevision,
+          receivedAt: performance.now(),
+        };
       } else if (msg.type === 'cell_delta_batch') {
+        const ownershipRevision = msg.ownershipRevision ?? msg.sequence;
+        const currentRevision = gameState.ownershipRevision;
+        if (this.awaitingOwnershipResync) {
+          return;
+        }
+        if (ownershipRevision < currentRevision) {
+          // A queued delta from before a recovery snapshot is stale.
+          return;
+        }
+        if (ownershipRevision > currentRevision + 1) {
+          netTelemetry.ownershipRevisionGaps++;
+          this.requestOwnershipResync(currentRevision, ownershipRevision);
+          return;
+        }
         const deltaMs = msg.matchState ?? (msg as any).match_state;
         if (deltaMs) {
           const mId = deltaMs.match_id ?? deltaMs.matchId;
@@ -375,7 +445,31 @@ export class GameClient {
             (window as any).__DOMINION_MATCH_PHASE__ = ph;
           }
         }
-        gameState.applyDeltas(msg.deltas, msg.tick, msg.sequence, msg.fronts, msg.matchState, msg.pendingAlliances);
+        gameState.applyDeltas(msg.deltas, msg.tick, msg.sequence, msg.fronts, msg.matchState, msg.pendingAlliances, ownershipRevision);
+        const playerId = gameState.yourFactionId;
+        const playerCells = msg.deltas
+          .filter((delta: any) => (delta.ownerId ?? delta.owner_id) === playerId)
+          .map((delta: any) => delta.index);
+        if (playerCells.length > 0) {
+          const connectedCells = playerCells.filter((index: number) => {
+            const x = index % gameState.width;
+            const y = Math.floor(index / gameState.width);
+            return (x > 0 && gameState.cellOwners[index - 1] === playerId)
+              || (x + 1 < gameState.width && gameState.cellOwners[index + 1] === playerId)
+              || (y > 0 && gameState.cellOwners[index - gameState.width] === playerId)
+              || (y + 1 < gameState.height && gameState.cellOwners[index + gameState.width] === playerId);
+          });
+          const progress = (window as any).__DOMINION_EXPANSION_PROGRESS__ as any[];
+          progress.push({
+            receivedAt: performance.now(),
+            authoritative: true,
+            ownershipRevision,
+            tick: msg.tick,
+            cells: playerCells,
+            connectedCells: connectedCells.length,
+          });
+          if (progress.length > 512) progress.splice(0, progress.length - 512);
+        }
       } else if (msg.type === 'server_metrics') {
         gameState.applyMetrics(msg);
       } else if (msg.type === 'faction_update') {
@@ -400,12 +494,19 @@ export class GameClient {
         console.log(`[EVENT] First Contact between ${fA} and ${fB}!`);
       } else if (msg.type === 'expand_result') {
         (window as any).__DOMINION_LAST_EXPAND_RESULT__ = msg;
+        const pendingIntent = (window as any).__DOMINION_PENDING_PRESENTATION_OPERATION__;
+        if (pendingIntent
+          && pendingIntent.mode === (gameState.operationMode || 'FOCUS')
+          && pendingIntent.targetCell === msg.requestedTarget) {
+          pendingIntent.resolvedAnchor = msg.resolvedAnchor ?? null;
+          pendingIntent.confirmedAt = performance.now();
+        }
         const size = msg.actualSize || 0;
         const areaKm2 = Math.round(size * 1550);
         const isSuccess = Boolean(msg.accepted && size > 0);
         const reasonText = msg.reason === 'accepted' ? 'Insufficient territory gain' : (msg.reason ? msg.reason.replaceAll('_', ' ') : 'No territory gained');
         (window as any).__DOMINION_COMMAND_UI__?.showToast(
-          isSuccess ? `FRONTIER SECURED · +${areaKm2.toLocaleString()} km²` : `EXPANSION HELD · ${reasonText}`,
+          isSuccess ? `NEUTRAL EXPANSION SECURED · ${gameState.operationMode} · +${areaKm2.toLocaleString()} km²` : `EXPANSION HELD · ${reasonText}`,
           isSuccess ? 'good' : 'warn',
         );
       } else if (msg.type === 'attack_result') {
@@ -525,6 +626,20 @@ export class GameClient {
     }, delay);
   }
 
+  private requestOwnershipResync(lastRevision: number, receivedRevision: number): void {
+    if (this.awaitingOwnershipResync) return;
+    this.awaitingOwnershipResync = true;
+    netTelemetry.snapshotResyncRequests++;
+    (window as any).__DOMINION_OWNERSHIP_SYNC__ = {
+      status: 'RESYNC_REQUESTED',
+      lastRevision,
+      receivedRevision,
+      requestedAt: performance.now(),
+    };
+    console.warn(`[NET OWNERSHIP] revision gap ${lastRevision} -> ${receivedRevision}; requesting authoritative snapshot`);
+    this.send({ type: 'request_snapshot' });
+  }
+
   public send(msg: any): boolean {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
@@ -554,10 +669,21 @@ export class GameClient {
   }
 
   public sendExpand(targetCellIndex: number, mode?: string, commitPercent?: number): boolean {
+    const selectedMode = mode || gameState.operationMode || 'FOCUS';
+    if (typeof window !== 'undefined' && (selectedMode === 'FOCUS' || selectedMode === 'FRONTIER')) {
+      const context = gameState.selectionContext;
+      (window as any).__DOMINION_PENDING_PRESENTATION_OPERATION__ = {
+        mode: selectedMode,
+        sourceCell: context?.sourceCell ?? gameState.selectedSourceCell ?? null,
+        targetCell: context?.targetCell ?? targetCellIndex,
+        resolvedAnchor: null,
+        sentAt: performance.now(),
+      };
+    }
     return this.send({
       type: 'expand_command',
       targetCellIndex,
-      mode: mode || gameState.operationMode || 'FOCUS',
+      mode: selectedMode,
       commitPercent: commitPercent || (gameState.populationCommitPercent / 100),
     });
   }

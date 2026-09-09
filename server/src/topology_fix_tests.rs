@@ -33,11 +33,19 @@ mod tests {
     #[test]
     fn test_01_hostile_across_water_rejected() {
         let mut sim = Simulation::new_standard(Some("roma"), 42);
-        let human = sim.factions.iter().find(|f| f.is_human).expect("human present");
+        let human = sim
+            .factions
+            .iter()
+            .find(|f| f.is_human)
+            .expect("human present");
         let human_id = human.faction_id;
         let pop_before = human.population;
 
-        let hellen = sim.factions.iter().find(|f| f.nation_preset_id == "hellen").expect("hellen present");
+        let hellen = sim
+            .factions
+            .iter()
+            .find(|f| f.nation_preset_id == "hellen")
+            .expect("hellen present");
         let hellen_id = hellen.faction_id;
         let hellen_cap = hellen.capital_cell;
 
@@ -50,12 +58,23 @@ mod tests {
             0.20,
         );
 
-        assert!(res.is_err(), "Attack across water without shared front must be rejected, got: {:?}", res);
+        assert!(
+            res.is_err(),
+            "Attack across water without shared front must be rejected, got: {:?}",
+            res
+        );
         assert_eq!(res.err().unwrap(), "no_shared_front");
 
         // Attacker population must be completely unchanged
-        let human_after = sim.factions.iter().find(|f| f.faction_id == human_id).unwrap();
-        assert_eq!(human_after.population, pop_before, "Failed attack must cost 0 population");
+        let human_after = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == human_id)
+            .unwrap();
+        assert_eq!(
+            human_after.population, pop_before,
+            "Failed attack must cost 0 population"
+        );
     }
 
     // TEST 2 — HOSTILE LOCAL BORDER
@@ -71,15 +90,13 @@ mod tests {
         sim.factions[1].population = 10_000.0;
         sim.factions[1].total_living_population = 10_000.0;
 
-        let res = sim.process_attack_command_with_intent(
-            1,
-            cap,
-            cap + 1,
-            Some(cap + 1),
-            0.20,
-        );
+        let res = sim.process_attack_command_with_intent(1, cap, cap + 1, Some(cap + 1), 0.20);
 
-        assert!(res.is_ok(), "Attack on shared land border must succeed: {:?}", res.err());
+        assert!(
+            res.is_ok(),
+            "Attack on shared land border must succeed: {:?}",
+            res.err()
+        );
         let outcome = res.unwrap();
         assert!(outcome.front_id > 0);
         assert!(outcome.deployed_population > 0.0);
@@ -101,8 +118,12 @@ mod tests {
 
         // Verify that the border cell `cap + 5` is directly adjacent to `cap + 6`,
         // whereas `cap` (the capital) is 6 cells away.
-        assert!(Simulation::cardinal(border_cell as usize).into_iter().any(|n| n == enemy_cell as usize));
-        assert!(!Simulation::cardinal(cap as usize).into_iter().any(|n| n == enemy_cell as usize));
+        assert!(Simulation::cardinal(border_cell as usize)
+            .into_iter()
+            .any(|n| n == enemy_cell as usize));
+        assert!(!Simulation::cardinal(cap as usize)
+            .into_iter()
+            .any(|n| n == enemy_cell as usize));
     }
 
     // TEST 4 — DISCONNECTED CAPTURE FORBIDDEN
@@ -117,10 +138,13 @@ mod tests {
 
         // Every cell in patch must be connected via legal land to owned territory or prior chosen cells
         for &c in &patch.cells {
-            let connected = legal_land_neighbors(&sim.cells, c as usize).into_iter().any(|n| {
-                sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32))
-            });
-            assert!(connected, "Every captured cell must be connected via legal land to operation component");
+            let connected = legal_land_neighbors(&sim.cells, c as usize)
+                .into_iter()
+                .any(|n| sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32)));
+            assert!(
+                connected,
+                "Every captured cell must be connected via legal land to operation component"
+            );
         }
     }
 
@@ -130,12 +154,19 @@ mod tests {
     // A and B LAND: Expected NOT connected. No fake diagonal bridge.
     #[test]
     fn test_05_diagonal_corner_water_not_connected() {
-        let mut cells = vec![Cell { owner_id: 0, terrain_type: 2, state_flags: 0 }; TOTAL_CELLS];
+        let mut cells = vec![
+            Cell {
+                owner_id: 0,
+                terrain_type: 2,
+                state_flags: 0
+            };
+            TOTAL_CELLS
+        ];
         let a = 100 * WORLD_WIDTH + 100;
         let b = 101 * WORLD_WIDTH + 101;
         cells[a].terrain_type = 0; // Land A
         cells[b].terrain_type = 0; // Land B
-        // (101, 100) and (100, 101) remain WATER (terrain_type 2)
+                                   // (101, 100) and (100, 101) remain WATER (terrain_type 2)
 
         let connected = cells_have_legal_land_connection(&cells, a, b);
         assert!(!connected, "Diagonal land touch with two intermediate water cells must NOT be connected (no fake corner bridge)");
@@ -147,7 +178,14 @@ mod tests {
     // At least one intermediate orthogonal cell is land: Connected.
     #[test]
     fn test_06_valid_diagonal_land_continuity() {
-        let mut cells = vec![Cell { owner_id: 0, terrain_type: 2, state_flags: 0 }; TOTAL_CELLS];
+        let mut cells = vec![
+            Cell {
+                owner_id: 0,
+                terrain_type: 2,
+                state_flags: 0
+            };
+            TOTAL_CELLS
+        ];
         let a = 100 * WORLD_WIDTH + 100;
         let b = 101 * WORLD_WIDTH + 101;
         let intermediate = 100 * WORLD_WIDTH + 101; // Orthogonal neighbor is LAND
@@ -156,7 +194,10 @@ mod tests {
         cells[intermediate].terrain_type = 0;
 
         let connected = cells_have_legal_land_connection(&cells, a, b);
-        assert!(connected, "Diagonal land touch with intermediate land cell MUST be connected");
+        assert!(
+            connected,
+            "Diagonal land touch with intermediate land cell MUST be connected"
+        );
     }
 
     // TEST 7 — FOCUS CONNECTED
@@ -168,14 +209,22 @@ mod tests {
         let patch = generate_focus_corridor_patch(&sim.cells, 1, target, 12);
         assert!(!patch.cells.is_empty());
 
-        let mut owned_set: HashSet<usize> = sim.cells.iter().enumerate()
+        let mut owned_set: HashSet<usize> = sim
+            .cells
+            .iter()
+            .enumerate()
             .filter(|(_, c)| c.owner_id == 1)
             .map(|(i, _)| i)
             .collect();
 
         for &c in &patch.cells {
-            let is_adj = legal_land_neighbors(&sim.cells, c as usize).into_iter().any(|n| owned_set.contains(&n));
-            assert!(is_adj, "Every newly captured FOCUS cell must connect to the growing sovereign component");
+            let is_adj = legal_land_neighbors(&sim.cells, c as usize)
+                .into_iter()
+                .any(|n| owned_set.contains(&n));
+            assert!(
+                is_adj,
+                "Every newly captured FOCUS cell must connect to the growing sovereign component"
+            );
             owned_set.insert(c as usize);
         }
     }
@@ -188,13 +237,18 @@ mod tests {
         let patch = generate_frontier_distribution_patch(&sim.cells, 1, 10);
         assert!(!patch.cells.is_empty());
 
-        let mut owned_set: HashSet<usize> = sim.cells.iter().enumerate()
+        let mut owned_set: HashSet<usize> = sim
+            .cells
+            .iter()
+            .enumerate()
             .filter(|(_, c)| c.owner_id == 1)
             .map(|(i, _)| i)
             .collect();
 
         for &c in &patch.cells {
-            let is_adj = legal_land_neighbors(&sim.cells, c as usize).into_iter().any(|n| owned_set.contains(&n));
+            let is_adj = legal_land_neighbors(&sim.cells, c as usize)
+                .into_iter()
+                .any(|n| owned_set.contains(&n));
             assert!(is_adj, "Every newly captured FRONTIER cell must connect to the growing sovereign component");
             owned_set.insert(c as usize);
         }
@@ -218,7 +272,12 @@ mod tests {
         let front_id = res.unwrap().front_id;
 
         // Verify front is anchored at border
-        let front = sim.combat_manager.fronts.iter().find(|f| f.front_id == front_id).unwrap();
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == front_id)
+            .unwrap();
         assert_eq!(front.source_cell_index, cap);
         assert_eq!(front.target_cell_index, cap + 1);
     }
@@ -233,7 +292,10 @@ mod tests {
         // Attack target far away with no border contact
         let res = sim.process_attack_command_with_intent(1, cap, cap + 50, None, 0.25);
         assert!(res.is_err());
-        assert_eq!(sim.factions[0].population, pop_before, "Rejected attack must deduct 0 population");
+        assert_eq!(
+            sim.factions[0].population, pop_before,
+            "Rejected attack must deduct 0 population"
+        );
     }
 
     // TEST 11 — LEGAL WEAK ATTACK MAY FAIL
@@ -266,9 +328,17 @@ mod tests {
             sim.step_dt(0.05);
         }
 
-        let front = sim.combat_manager.fronts.iter().find(|f| f.front_id == outcome.front_id).unwrap();
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == outcome.front_id)
+            .unwrap();
         // Attacker must not have received a free minimum-cell rescue
-        assert_eq!(front.captured_cells, 0, "Weak attack must fail with 0 captured cells (no minimum-cell rescue)");
+        assert_eq!(
+            front.captured_cells, 0,
+            "Weak attack must fail with 0 captured cells (no minimum-cell rescue)"
+        );
     }
 
     // TEST 12 — NO FREE BACKFILL
@@ -278,10 +348,20 @@ mod tests {
         let (sim, cap) = setup_open_grid_sim();
         for budget in [1, 2, 4, 8] {
             let patch_focus = generate_focus_corridor_patch(&sim.cells, 1, cap + 20, budget);
-            assert!(patch_focus.cells.len() <= budget, "FOCUS captured cells ({}) must not exceed budget ({})", patch_focus.cells.len(), budget);
+            assert!(
+                patch_focus.cells.len() <= budget,
+                "FOCUS captured cells ({}) must not exceed budget ({})",
+                patch_focus.cells.len(),
+                budget
+            );
 
             let patch_frontier = generate_frontier_distribution_patch(&sim.cells, 1, budget);
-            assert!(patch_frontier.cells.len() <= budget, "FRONTIER captured cells ({}) must not exceed budget ({})", patch_frontier.cells.len(), budget);
+            assert!(
+                patch_frontier.cells.len() <= budget,
+                "FRONTIER captured cells ({}) must not exceed budget ({})",
+                patch_frontier.cells.len(),
+                budget
+            );
         }
     }
 
@@ -293,7 +373,8 @@ mod tests {
         let (sim, cap) = setup_open_grid_sim();
         let target = cap + 10;
         let focus = generate_focus_corridor_patch(&sim.cells, 1, target, 6);
-        let frontier = generate_frontier_distribution_patch_targeted(&sim.cells, 1, 6, Some(target));
+        let frontier =
+            generate_frontier_distribution_patch_targeted(&sim.cells, 1, 6, Some(target));
 
         assert!(!focus.cells.is_empty());
         assert!(!frontier.cells.is_empty());
@@ -301,7 +382,10 @@ mod tests {
         let focus_set: HashSet<u32> = focus.cells.into_iter().collect();
         let frontier_set: HashSet<u32> = frontier.cells.into_iter().collect();
 
-        assert_ne!(focus_set, frontier_set, "FOCUS and FRONTIER must produce different cell distributions");
+        assert_ne!(
+            focus_set, frontier_set,
+            "FOCUS and FRONTIER must produce different cell distributions"
+        );
     }
 
     // TEST 14 — AI GLOBAL ATTACK FORBIDDEN
@@ -311,15 +395,23 @@ mod tests {
         let sim = Simulation::new_standard(Some("roma"), 42);
         // Roma is in Italy (101). Check all bot targets for all factions
         for f in &sim.factions {
-            if f.is_human || f.is_eliminated { continue; }
+            if f.is_human || f.is_eliminated {
+                continue;
+            }
             let personality = crate::bot::BotPersonality::for_bot(42, f.faction_id);
             let archetype = crate::bot::BotExpansionArchetype::for_bot(42, f.faction_id);
-            let targets = crate::bot::scan_targets(&sim, f.faction_id, 42, &personality, archetype, 0, &[]);
+            let targets =
+                crate::bot::scan_targets(&sim, f.faction_id, 42, &personality, archetype, 0, &[]);
 
             if let Some((_, source, enemy_target, _)) = targets.war_target {
                 // Must be a direct cardinal border neighbor
-                let is_cardinal_border = Simulation::cardinal(source as usize).into_iter().any(|n| n == enemy_target as usize);
-                assert!(is_cardinal_border, "AI war target must be an adjacent border neighbor");
+                let is_cardinal_border = Simulation::cardinal(source as usize)
+                    .into_iter()
+                    .any(|n| n == enemy_target as usize);
+                assert!(
+                    is_cardinal_border,
+                    "AI war target must be an adjacent border neighbor"
+                );
             }
         }
     }
@@ -335,7 +427,9 @@ mod tests {
         }
 
         for f in &sim.factions {
-            if f.is_eliminated || f.territory_count == 0 { continue; }
+            if f.is_eliminated || f.territory_count == 0 {
+                continue;
+            }
             let cap = f.capital_cell as usize;
             let mut visited = HashSet::new();
             let mut queue = std::collections::VecDeque::new();
@@ -345,17 +439,73 @@ mod tests {
             }
             while let Some(curr) = queue.pop_front() {
                 for n in legal_land_neighbors(&sim.cells, curr) {
-                    if sim.cells[n].owner_id == f.faction_id && sim.cells[n].terrain_type == 0 && visited.insert(n) {
+                    if sim.cells[n].owner_id == f.faction_id
+                        && sim.cells[n].terrain_type == 0
+                        && visited.insert(n)
+                    {
                         queue.push_back(n);
                     }
                 }
             }
 
             // Every owned mainland cell connected to capital component
-            let owned_count = sim.cells.iter().filter(|c| c.owner_id == f.faction_id && c.terrain_type == 0).count();
+            let owned_count = sim
+                .cells
+                .iter()
+                .filter(|c| c.owner_id == f.faction_id && c.terrain_type == 0)
+                .count();
             // Capital component should cover the vast majority of starting nucleus
-            assert!(visited.len() >= 1, "Faction {} must have valid sovereign component around capital", f.faction_id);
+            assert!(
+                visited.len() >= 1,
+                "Faction {} must have valid sovereign component around capital",
+                f.faction_id
+            );
             assert!(visited.len() <= owned_count);
         }
+    }
+
+    // TEST 16 — SMALL HUMAN FOCUS FOLLOWS THE CLICKED EAST DIRECTION
+    // The canonical Roma match must not turn a 12% FOCUS command into a
+    // northward tower because of generic row/BFS ordering.
+    #[test]
+    fn test_16_small_focus_east_forms_a_local_eastward_lobe() {
+        let mut sim = Simulation::new_standard(Some("roma"), 42);
+        let human = sim.factions.iter().find(|f| f.is_human).unwrap();
+        let human_id = human.faction_id;
+        let source = 139_812usize;
+        let target = 139_813u32;
+
+        assert_eq!(sim.cells[source].owner_id, human_id);
+        assert_eq!(sim.cells[target as usize].owner_id, 0);
+
+        let outcome = sim
+            .process_expand_command_with_mode(human_id, target, "FOCUS", Some(0.12))
+            .unwrap();
+        assert!(
+            (1..=8).contains(&outcome.patch.cells.len()),
+            "12% FOCUS must remain a compact local lobe, got {} cells",
+            outcome.patch.cells.len()
+        );
+
+        let source_x = source % WORLD_WIDTH;
+        let source_y = source / WORLD_WIDTH;
+        let mut rows = std::collections::HashSet::new();
+        for cell in outcome.patch.cells {
+            let index = cell as usize;
+            let x = index % WORLD_WIDTH;
+            let y = index / WORLD_WIDTH;
+            rows.insert(y);
+            assert!(
+                // A compact directional lobe may broaden two raster rows
+                // around its local anchor. A one-row ruler rejects the
+                // intended organic all-angle morphology.
+                x > source_x && y.abs_diff(source_y) <= 2,
+                "12% east FOCUS captured ({x},{y}) outside its local eastward lobe from ({source_x},{source_y})"
+            );
+        }
+        assert!(
+            rows.len() >= 2,
+            "fresh FOCUS must have a visible front shoulder, not a one-cell bar"
+        );
     }
 }

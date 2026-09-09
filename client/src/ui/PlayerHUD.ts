@@ -43,11 +43,12 @@ export class PlayerHUD {
       } else {
         const population = Math.floor(playerFaction.population);
         const capacity = Math.max(1, Math.floor(playerFaction.populationCapacity));
-        this.populationEl.textContent = population.toLocaleString();
+        this.populationEl.textContent = this.formatPopulation(population);
+        this.populationEl.title = `${population.toLocaleString()} citizens (Capacity: ${capacity.toLocaleString()})`;
         const growth = playerFaction.populationGrowthPerSecond;
         const growthStr = (growth >= 0 ? '+' : '') + Math.round(growth).toLocaleString() + '/s';
         const isNearLimit = population >= capacity * 0.90;
-        this.growthEl.textContent = isNearLimit ? `${growthStr} (LAND LIMIT)` : growthStr;
+        this.growthEl.innerHTML = isNearLimit ? `${growthStr} <span class="growth-land-limit" title="Growth constrained by territorial carrying capacity">LAND LIMIT</span>` : growthStr;
         this.territoryCountEl.textContent = this.formatArea(playerFaction.controlledAreaKm2);
         if (this.populationBarEl instanceof HTMLElement) {
           this.populationBarEl.style.width = Math.max(0, Math.min(100, population / capacity * 100)).toFixed(1) + '%';
@@ -65,6 +66,13 @@ export class PlayerHUD {
       this.connectionDotEl.classList.toggle('is-connected', gameState.isConnected);
       this.connectionDotEl.setAttribute('aria-label', gameState.isConnected ? 'Connected to Dominion server' : 'Connection interrupted');
     }
+  }
+
+  private formatPopulation(pop: number): string {
+    if (!Number.isFinite(pop) || pop <= 0) return '0';
+    if (pop >= 1_000_000) return `${(pop / 1_000_000).toFixed(2)}M`;
+    if (pop >= 1_000) return `${(pop / 1_000).toFixed(2)}K`;
+    return Math.round(pop).toLocaleString();
   }
 
   private formatArea(areaKm2: number): string {

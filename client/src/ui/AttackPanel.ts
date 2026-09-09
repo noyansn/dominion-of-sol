@@ -646,9 +646,9 @@ export class AttackPanel {
       return;
     }
 
-    if (context.action === 'EXPAND_FRONTIER' && context.targetCell !== null) {
+    if (context.action === 'NEUTRAL_EXPANSION' && context.targetCell !== null) {
       const ok = gameClient.sendExpand(context.targetCell, gameState.operationMode, gameState.populationCommitPercent / 100);
-      if (ok) (window as any).__DOMINION_COMMAND_UI__?.showToast(`Frontier advance ordered (${gameState.operationMode})`, 'good');
+      if (ok) (window as any).__DOMINION_COMMAND_UI__?.showToast(`Neutral expansion ordered · ${gameState.operationMode}`, 'good');
     } else if (context.action === 'LAUNCH_OFFENSIVE' && context.sourceCell !== null && context.targetCell !== null) {
       const source = context.sourceCell;
       const target = context.targetCell;
@@ -706,7 +706,7 @@ export class AttackPanel {
     }
 
     const legality = gameState.attackLegality(source, target);
-    const isActionLegal = (context?.action === 'EXPAND_FRONTIER' && context.targetCell !== null) ||
+    const isActionLegal = (context?.action === 'NEUTRAL_EXPANSION' && context.targetCell !== null) ||
                           (context?.action === 'LAUNCH_OFFENSIVE' && legality.legal);
 
     this.panel.dataset.state = active ? 'active' : defending ? 'defending' : isActionLegal ? 'ready' : 'idle';
@@ -772,7 +772,7 @@ export class AttackPanel {
       if (verb) verb.textContent = legality.legal ? 'OFFENSIVE' : 'BLOCKED';
     } else {
       if (this.combatDeck) this.combatDeck.style.display = 'none';
-      if (context?.action === 'EXPAND_FRONTIER') {
+      if (context?.action === 'NEUTRAL_EXPANSION') {
         if (this.eyebrow) this.eyebrow.textContent = 'FRONTIER EXPANSION';
         if (this.title) this.title.textContent = gameState.operationMode === 'FOCUS' ? 'FOCUS ADVANCE' : 'FRONTIER EXPANSION';
         if (verb) verb.textContent = gameState.operationMode === 'FOCUS' ? 'FOCUS' : 'FRONTIER';
@@ -788,7 +788,7 @@ export class AttackPanel {
       this.btnBladeExecute.classList.toggle('active', Boolean(active));
       const lbl = this.btnBladeExecute.querySelector('.execute-label');
       if (lbl) {
-        lbl.textContent = active ? 'REINFORCE' : isActionLegal ? (context?.action === 'EXPAND_FRONTIER' ? 'ADVANCE' : 'STRIKE') : 'COMMIT';
+        lbl.textContent = active ? 'REINFORCE' : isActionLegal ? (context?.action === 'NEUTRAL_EXPANSION' ? 'EXPAND' : 'STRIKE') : 'COMMIT';
       }
     }
 

@@ -32,6 +32,7 @@ declare global {
 export class GameState {
   public tick: number = 0;
   public sequence: number = 0;
+  public ownershipRevision: number = 0;
   public width: number = DEFAULT_MAP_WIDTH;
   public height: number = DEFAULT_MAP_HEIGHT;
   public totalCells: number = DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT;
@@ -81,6 +82,15 @@ export class GameState {
   public isInitialized: boolean = false;
   public connectionStatusText: string = 'Connecting...';
 
+  public ownerGridHash(): string {
+    let hash = 0xcbf29ce484222325n;
+    for (const owner of this.cellOwners) {
+      hash ^= BigInt(owner);
+      hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+    }
+    return hash.toString(16).padStart(16, '0');
+  }
+
   public selectedSourceCell: number | null = null;
   public selectedTargetCell: number | null = null;
   /** The last contextual land pick. Source/target cells are resolved from this target intent. */
@@ -126,6 +136,7 @@ export class GameState {
   public applySnapshot(msg: WorldSnapshotMessage) {
     this.tick = msg.tick;
     this.sequence = msg.sequence;
+    this.ownershipRevision = msg.ownershipRevision ?? msg.sequence;
     if (msg.width && msg.height) {
       this.width = msg.width;
       this.height = msg.height;
@@ -286,9 +297,10 @@ export class GameState {
     this.notify('WORLD_SNAPSHOT');
   }
 
-  public applyDeltas(deltas: CellDelta[], tick: number, sequence: number, fronts?: FrontInfo[], matchState?: MatchStateInfo, pendingAlliances?: AllianceProposalInfo[]) {
+  public applyDeltas(deltas: CellDelta[], tick: number, sequence: number, fronts?: FrontInfo[], matchState?: MatchStateInfo, pendingAlliances?: AllianceProposalInfo[], ownershipRevision?: number) {
     this.tick = tick;
     this.sequence = sequence;
+    this.ownershipRevision = ownershipRevision ?? sequence;
     this.deltasReceivedTotal += deltas.length;
 
     const chunksX = this.width / CHUNK_SIZE;
@@ -538,7 +550,9 @@ export class GameState {
     this.selectionContext = context;
     this.selectedSourceCell = context.sourceCell;
     this.selectedTargetCell = context.targetCell;
-    const isHostile = context.action === 'LAUNCH_OFFENSIVE' || context.action === 'EXPAND_FRONTIER';
+    const isHostile = context.action === 'LAUNCH_OFFENSIVE'
+      || context.action === 'NEUTRAL_EXPANSION'
+      || context.action === 'AMPHIBIOUS_COLONIZATION';
     this.spotlightFactionId = (keepSpotlight && !isHostile && context.ownerId > 0) ? context.ownerId : null;
     this.notify('SELECTION_CHANGED', context);
   }

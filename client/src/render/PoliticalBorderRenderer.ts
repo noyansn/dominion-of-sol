@@ -8,6 +8,37 @@ const BORDER_CHUNK = 256;
 type BorderPath = { points: { x: number; y: number }[]; closed: boolean };
 type BorderChunk = { graphics: PIXI.Graphics; paths: BorderPath[]; rect: VisualRect };
 
+export interface PoliticalBorderMetrics {
+    rebuilds: number;
+    cellsProcessed: number;
+    pathPoints: number;
+    totalMs: number;
+    maxMs: number;
+    samples: number[];
+}
+
+const borderMetrics: PoliticalBorderMetrics = {
+    rebuilds: 0,
+    cellsProcessed: 0,
+    pathPoints: 0,
+    totalMs: 0,
+    maxMs: 0,
+    samples: [],
+};
+
+export function resetPoliticalBorderMetrics(): void {
+    borderMetrics.rebuilds = 0;
+    borderMetrics.cellsProcessed = 0;
+    borderMetrics.pathPoints = 0;
+    borderMetrics.totalMs = 0;
+    borderMetrics.maxMs = 0;
+    borderMetrics.samples.length = 0;
+}
+
+export function getPoliticalBorderMetrics(): PoliticalBorderMetrics {
+    return { ...borderMetrics, samples: [...borderMetrics.samples] };
+}
+
 export class PoliticalBorderRenderer {
     public container = new PIXI.Container();
     private graphics!: PIXI.Graphics;
@@ -60,6 +91,7 @@ export class PoliticalBorderRenderer {
     }
 
     private rebuildChunk(key: number): void {
+        const startedAt = performance.now();
         const columns = Math.ceil(POLITICAL_WIDTH / BORDER_CHUNK);
         const x = (key % columns) * BORDER_CHUNK, y = Math.floor(key / columns) * BORDER_CHUNK;
         let chunk = this.chunks.get(key);
@@ -76,6 +108,14 @@ export class PoliticalBorderRenderer {
         this.redraw();
         this.updateChunkVisibility(chunk);
         this.rebuiltChunks++;
+        const elapsed = performance.now() - startedAt;
+        borderMetrics.rebuilds++;
+        borderMetrics.cellsProcessed += Math.max(0, (chunk.rect.maxX - chunk.rect.minX) * (chunk.rect.maxY - chunk.rect.minY));
+        borderMetrics.pathPoints += chunk.paths.reduce((sum, path) => sum + path.points.length, 0);
+        borderMetrics.totalMs += elapsed;
+        borderMetrics.maxMs = Math.max(borderMetrics.maxMs, elapsed);
+        if (borderMetrics.samples.length >= 128) borderMetrics.samples.shift();
+        borderMetrics.samples.push(elapsed);
     }
 
     private extractContours(rect: VisualRect): void {
@@ -106,7 +146,8 @@ export class PoliticalBorderRenderer {
                 if (x + 1 < w) {
                     const r_i = i + 1;
                     const r_owner = owners[r_i];
-                    if (isLand && land[r_i] && owner !== r_owner && (owner !== 0 || r_owner !== 0)) {
+                    if (isLand && land[r_i] && owner !== r_owner && (owner !== 0 || r_owner !== 0)
+                        && !this.isInternalNeutralSeam(owners, land, w, h, x, y, true, owner, r_owner)) {
                         // Vertical edge between (x+1, y) and (x+1, y+1)
                         const v1 = y * (w + 1) + (x + 1);
                         const v2 = (y + 1) * (w + 1) + (x + 1);
@@ -118,7 +159,8 @@ export class PoliticalBorderRenderer {
                 if (y + 1 < h) {
                     const b_i = i + w;
                     const b_owner = owners[b_i];
-                    if (isLand && land[b_i] && owner !== b_owner && (owner !== 0 || b_owner !== 0)) {
+                    if (isLand && land[b_i] && owner !== b_owner && (owner !== 0 || b_owner !== 0)
+                        && !this.isInternalNeutralSeam(owners, land, w, h, x, y, false, owner, b_owner)) {
                         // Horizontal edge between (x, y+1) and (x+1, y+1)
                         const v1 = (y + 1) * (w + 1) + x;
                         const v2 = (y + 1) * (w + 1) + (x + 1);
@@ -216,6 +258,54 @@ export class PoliticalBorderRenderer {
             if (points.length > 8) points = this.chaikinSmooth(points, p.closed);
             return { points, closed: p.closed };
         });
+    }
+
+    /**
+     * A one-pixel/one-cell neutral slit inside the same already-owned
+     * country is a presentation seam, not a political border.  The fill
+     * shader already closes this bounded notch with same-faction support; do
+     * not draw a dark line through the closed visual silhouette.  This never
+     * suppresses faction-vs-faction borders, water borders, or a seam that is
+     * not enclosed by the same owner on both sides.
+     */
+    private isInternalNeutralSeam(
+        owners: Uint8Array,
+        land: Uint8Array,
+        width: number,
+        height: number,
+        x: number,
+        y: number,
+        vertical: boolean,
+        firstOwner: number,
+        secondOwner: number,
+    ): boolean {
+        if (firstOwner !== 0 && secondOwner !== 0) return false;
+        const owner = firstOwner !== 0 ? firstOwner : secondOwner;
+        if (owner === 0) return false;
+
+        if (vertical) {
+            if (x + 1 >= width) return false;
+            const oppositeX = firstOwner === owner ? x + 1 : x;
+            const above = y - 1;
+            const below = y + 1;
+            if (above < 0 || below >= height) return false;
+            const aboveIndex = above * width + oppositeX;
+            const belowIndex = below * width + oppositeX;
+            return land[aboveIndex] !== 0 && land[belowIndex] !== 0
+                && owners[aboveIndex] === owner
+                && owners[belowIndex] === owner;
+        }
+
+        if (y + 1 >= height) return false;
+        const oppositeY = firstOwner === owner ? y + 1 : y;
+        const left = x - 1;
+        const right = x + 1;
+        if (left < 0 || right >= width) return false;
+        const leftIndex = oppositeY * width + left;
+        const rightIndex = oppositeY * width + right;
+        return land[leftIndex] !== 0 && land[rightIndex] !== 0
+            && owners[leftIndex] === owner
+            && owners[rightIndex] === owner;
     }
 
     private toWorldPoints(indices: number[], stride: number) {

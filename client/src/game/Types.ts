@@ -116,6 +116,7 @@ export interface WorldSnapshotMessage {
   type: 'world_snapshot';
   tick: number;
   sequence: number;
+  ownershipRevision?: number;
   width: number;
   height: number;
   totalCells: number;
@@ -134,6 +135,7 @@ export interface CellDeltaBatchMessage {
   type: 'cell_delta_batch';
   tick: number;
   sequence: number;
+  ownershipRevision?: number;
   deltas: CellDelta[];
   fronts: FrontInfo[];
   matchState: MatchStateInfo;

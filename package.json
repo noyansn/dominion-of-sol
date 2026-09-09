@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "dev:server": "scripts\\dev-server.cmd",
+    "build:server": "scripts\\build-server.cmd",
+    "dev:client": "npm --prefix client run dev",
+    "fixture:server": "node server/server.node.js"
+  },
+  "dependencies": {
+    "earcut": "^3.2.3",
+    "geotiff": "^3.0.5",
+    "pngjs": "^7.0.0",
+    "shapefile": "^0.6.6",
+    "ws": "^8.21.3"
+  }
+}

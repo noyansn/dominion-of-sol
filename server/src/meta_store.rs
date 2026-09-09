@@ -1,9 +1,9 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use rand::Rng;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,24 +175,108 @@ impl MetaStore {
             ("dominion.blade.turk01", 450, vec!["blade_turk_imperial"]),
             ("dominion.blade.roma01", 450, vec!["blade_roma_legion"]),
             ("dominion.blade.han01", 450, vec!["blade_han_celestial"]),
-            ("dominion.blade.yamato01", 450, vec!["blade_yamato_shogunate"]),
+            (
+                "dominion.blade.yamato01",
+                450,
+                vec!["blade_yamato_shogunate"],
+            ),
             ("dominion.blade.norse01", 450, vec!["blade_norse_raven"]),
             ("dominion.blade.pers01", 450, vec!["blade_pers_shamshir"]),
             ("dominion.blade.misir01", 450, vec!["blade_misir_khopesh"]),
             ("dominion.blade.maya01", 450, vec!["blade_maya_macuahuitl"]),
-            ("dominion.blade.blackhills01", 450, vec!["blade_lakota_command"]),
+            (
+                "dominion.blade.blackhills01",
+                450,
+                vec!["blade_lakota_command"],
+            ),
             // 9 Civilization Reaction Packs (3 reactions per civ)
-            ("dominion.reactions.turk.court01", 450, vec!["reaction_turk_standard", "reaction_turk_gate", "reaction_turk_salute"]),
-            ("dominion.reactions.roma.legion01", 450, vec!["reaction_roma_aquila", "reaction_roma_shieldwall", "reaction_roma_triumph"]),
-            ("dominion.reactions.pers.court01", 450, vec!["reaction_pers_lion", "reaction_pers_shamshir", "reaction_pers_court"]),
-            ("dominion.reactions.misir.sun01", 450, vec!["reaction_misir_sun", "reaction_misir_ankh", "reaction_misir_pyramid"]),
-            ("dominion.reactions.han.dragon01", 450, vec!["reaction_han_seal", "reaction_han_dragon", "reaction_han_bow"]),
-            ("dominion.reactions.yamato.honor01", 450, vec!["reaction_yamato_sheathe", "reaction_yamato_torii", "reaction_yamato_bow"]),
-            ("dominion.reactions.norse.raid01", 450, vec!["reaction_norse_strike", "reaction_norse_raven", "reaction_norse_horn"]),
-            ("dominion.reactions.maya.astronomy01", 450, vec!["reaction_maya_glyph", "reaction_maya_quetzal", "reaction_maya_sun"]),
-            ("dominion.reactions.lakota01", 450, vec!["reaction_lakota_fourwinds", "reaction_lakota_eagle", "reaction_lakota_campfire"]),
+            (
+                "dominion.reactions.turk.court01",
+                450,
+                vec![
+                    "reaction_turk_standard",
+                    "reaction_turk_gate",
+                    "reaction_turk_salute",
+                ],
+            ),
+            (
+                "dominion.reactions.roma.legion01",
+                450,
+                vec![
+                    "reaction_roma_aquila",
+                    "reaction_roma_shieldwall",
+                    "reaction_roma_triumph",
+                ],
+            ),
+            (
+                "dominion.reactions.pers.court01",
+                450,
+                vec![
+                    "reaction_pers_lion",
+                    "reaction_pers_shamshir",
+                    "reaction_pers_court",
+                ],
+            ),
+            (
+                "dominion.reactions.misir.sun01",
+                450,
+                vec![
+                    "reaction_misir_sun",
+                    "reaction_misir_ankh",
+                    "reaction_misir_pyramid",
+                ],
+            ),
+            (
+                "dominion.reactions.han.dragon01",
+                450,
+                vec![
+                    "reaction_han_seal",
+                    "reaction_han_dragon",
+                    "reaction_han_bow",
+                ],
+            ),
+            (
+                "dominion.reactions.yamato.honor01",
+                450,
+                vec![
+                    "reaction_yamato_sheathe",
+                    "reaction_yamato_torii",
+                    "reaction_yamato_bow",
+                ],
+            ),
+            (
+                "dominion.reactions.norse.raid01",
+                450,
+                vec![
+                    "reaction_norse_strike",
+                    "reaction_norse_raven",
+                    "reaction_norse_horn",
+                ],
+            ),
+            (
+                "dominion.reactions.maya.astronomy01",
+                450,
+                vec![
+                    "reaction_maya_glyph",
+                    "reaction_maya_quetzal",
+                    "reaction_maya_sun",
+                ],
+            ),
+            (
+                "dominion.reactions.lakota01",
+                450,
+                vec![
+                    "reaction_lakota_fourwinds",
+                    "reaction_lakota_eagle",
+                    "reaction_lakota_campfire",
+                ],
+            ),
             // Season Pass
-            ("dominion.pass.s1.premium", 1000, vec!["dominion.pass.s1.active"]),
+            (
+                "dominion.pass.s1.premium",
+                1000,
+                vec!["dominion.pass.s1.active"],
+            ),
         ];
 
         for (sku, cost, ents) in items {
@@ -387,7 +471,11 @@ impl MetaStore {
         }
 
         // Idempotency check: Has this transaction already been processed?
-        if acc.ledger.iter().any(|e| e.idempotency_key == idempotency_key) {
+        if acc
+            .ledger
+            .iter()
+            .any(|e| e.idempotency_key == idempotency_key)
+        {
             // Already processed: return current snapshot without double charge
             let is_dev = self.is_dev_mode;
             return Ok(acc.to_snapshot(is_dev));
@@ -608,25 +696,39 @@ mod tests {
         assert!(matches!(fail_res, Err(PurchaseError::InsufficientBalance)));
 
         // Dev grant 1000 marks
-        store.dev_command(&acc.account_id, &acc.session_token, "add_marks", Some(1000), None).unwrap();
-        
+        store
+            .dev_command(
+                &acc.account_id,
+                &acc.session_token,
+                "add_marks",
+                Some(1000),
+                None,
+            )
+            .unwrap();
+
         // Now balance is 1100. Purchase should succeed.
-        let succ_res = store.purchase_sku(
-            &acc.account_id,
-            &acc.session_token,
-            "dominion.blade.turk01",
-            "tx_key_1",
-        ).unwrap();
+        let succ_res = store
+            .purchase_sku(
+                &acc.account_id,
+                &acc.session_token,
+                "dominion.blade.turk01",
+                "tx_key_1",
+            )
+            .unwrap();
         assert_eq!(succ_res.wallet_balance, 650);
-        assert!(succ_res.entitlements.contains(&"blade_turk_imperial".to_string()));
+        assert!(succ_res
+            .entitlements
+            .contains(&"blade_turk_imperial".to_string()));
 
         // Duplicate purchase with SAME idempotency key must NOT deduct again!
-        let dup_res = store.purchase_sku(
-            &acc.account_id,
-            &acc.session_token,
-            "dominion.blade.turk01",
-            "tx_key_1",
-        ).unwrap();
+        let dup_res = store
+            .purchase_sku(
+                &acc.account_id,
+                &acc.session_token,
+                "dominion.blade.turk01",
+                "tx_key_1",
+            )
+            .unwrap();
         assert_eq!(dup_res.wallet_balance, 650);
     }
 
@@ -639,10 +741,22 @@ mod tests {
         let (acc_b, _) = store.create_guest(Some("PlayerB".to_string()));
 
         // Link acc_a to google:test@dominion.com
-        store.link_account(&acc_a.account_id, &acc_a.session_token, "google", "test@dominion.com").unwrap();
+        store
+            .link_account(
+                &acc_a.account_id,
+                &acc_a.session_token,
+                "google",
+                "test@dominion.com",
+            )
+            .unwrap();
 
         // acc_b tries to link to same google:test@dominion.com -> MUST FAIL with Conflict
-        let conflict = store.link_account(&acc_b.account_id, &acc_b.session_token, "google", "test@dominion.com");
+        let conflict = store.link_account(
+            &acc_b.account_id,
+            &acc_b.session_token,
+            "google",
+            "test@dominion.com",
+        );
         assert!(matches!(conflict, Err(LinkError::Conflict { .. })));
     }
 
@@ -653,7 +767,13 @@ mod tests {
         let mut store = MetaStore::new(path, false); // is_dev_mode = false
         let (acc, _) = store.create_guest(Some("PlayerProd".to_string()));
 
-        let res = store.dev_command(&acc.account_id, &acc.session_token, "add_marks", Some(9999), None);
+        let res = store.dev_command(
+            &acc.account_id,
+            &acc.session_token,
+            "add_marks",
+            Some(9999),
+            None,
+        );
         assert_eq!(res.unwrap_err(), "DEV_COMMANDS_REJECTED_IN_PRODUCTION");
     }
 
@@ -685,6 +805,7 @@ mod tests {
 
         // Reaction check
         assert!(store.is_reaction_usable(&acc.account_id, "reaction_salute")); // Free universal
-        assert!(!store.is_reaction_usable(&acc.account_id, "reaction_roma_aquila")); // Unowned premium
+        assert!(!store.is_reaction_usable(&acc.account_id, "reaction_roma_aquila"));
+        // Unowned premium
     }
 }

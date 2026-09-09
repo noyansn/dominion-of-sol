@@ -19,6 +19,17 @@ export class PoliticalSurfaceCache {
     public lastDirtyRect: VisualRect | null = null;
     public lastDirtyRects: VisualRect[] = [];
     public totalDirtyPixels = 0;
+    // This is the committed presentation ownership source. It intentionally
+    // lags authoritative GameState for cells that are still inside an active
+    // political reveal. Keeping it explicit prevents an expanded dirty rect
+    // from accidentally painting a newly-authorized cell into the base fill.
+    private presentationCellOwners = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
+
+    public get presentationRevision(): number { return this.surfaceRevision; }
+
+    public isPresentationOwnerCommitted(cell: number): boolean {
+        return this.presentationCellOwners[cell] === (gameState.cellOwners[cell] ?? 0);
+    }
 
     public get ownerBuffer(): Uint8Array {
         return this.field.owners;
@@ -55,10 +66,8 @@ export class PoliticalSurfaceCache {
         // authoritative terrain array becomes available, so coastal fragments
         // are never graded from the pre-snapshot all-zero buffer.
         this.field.setSimulationTerrains(gameState.cellTerrains);
-        this.field.fullBuild(
-            gameState.cellOwners,
-            this.capitalCells(),
-        );
+        this.presentationCellOwners.set(gameState.cellOwners);
+        this.field.fullBuild(this.presentationCellOwners, this.capitalCells());
 
         this.fullBuildCount++;
         this.surfaceRevision++;
@@ -140,11 +149,19 @@ export class PoliticalSurfaceCache {
 
     public syncDirtyCells(
         indices: readonly number[],
+        blockedCells: ReadonlySet<number> = new Set(),
     ): void {
+        const committed = indices.filter(index => !blockedCells.has(index));
+        if (committed.length === 0) return;
+        for (const index of committed) {
+            if (index >= 0 && index < this.presentationCellOwners.length) {
+                this.presentationCellOwners[index] = gameState.cellOwners[index] ?? 0;
+            }
+        }
         this.lastDirtyRects =
             this.field.updateDirtyRegions(
-                gameState.cellOwners,
-                indices,
+                this.presentationCellOwners,
+                committed,
                 this.capitalCells(),
             );
         this.lastDirtyRect = this.lastDirtyRects[0] ?? null;

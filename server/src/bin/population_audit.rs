@@ -26,7 +26,7 @@ mod world_map;
 pub mod world_topology;
 
 use bot::BotManager;
-use simulation::Simulation;
+use simulation::{MacroPhase, Simulation};
 use std::collections::BTreeMap;
 
 fn cardinal(index: usize) -> [Option<usize>; 4] {
@@ -41,12 +41,20 @@ fn cardinal(index: usize) -> [Option<usize>; 4] {
 }
 
 fn neutral_frontier_candidates(sim: &Simulation, owner: u8) -> Vec<u32> {
-    let mut candidates = sim.cells.iter().enumerate().filter_map(|(index, cell)| {
-        (cell.owner_id == 0
-            && cell.terrain_type == 0
-            && cardinal(index).into_iter().flatten().any(|neighbor| sim.cells[neighbor].owner_id == owner))
+    let mut candidates = sim
+        .cells
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| {
+            (cell.owner_id == 0
+                && cell.terrain_type == 0
+                && cardinal(index)
+                    .into_iter()
+                    .flatten()
+                    .any(|neighbor| sim.cells[neighbor].owner_id == owner))
             .then_some(index as u32)
-    }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     // The audit must not be defeated by one geometrically valid but
     // topologically cramped first candidate. Try the complete deterministic
     // frontier set, in stable cell order, until the real command accepts one.
@@ -62,10 +70,17 @@ fn try_expand(sim: &mut Simulation, owner: u8) -> bool {
 }
 
 fn faction(sim: &Simulation, id: u8) -> &protocol::FactionInfo {
-    sim.factions.iter().find(|f| f.faction_id == id).expect("faction")
+    sim.factions
+        .iter()
+        .find(|f| f.faction_id == id)
+        .expect("faction")
 }
 
-fn profile(name: &str, duration_seconds: usize, action_period: Option<usize>) -> BTreeMap<String, String> {
+fn profile(
+    name: &str,
+    duration_seconds: usize,
+    action_period: Option<usize>,
+) -> BTreeMap<String, String> {
     // Keep a neutral second faction alive so the pacing comparison can run
     // after the first expansion; a one-faction simulation is correctly a
     // completed match by definition.
@@ -77,11 +92,17 @@ fn profile(name: &str, duration_seconds: usize, action_period: Option<usize>) ->
     let mut trajectory_samples = BTreeMap::new();
     for second in 0..duration_seconds {
         if action_period.is_some_and(|period| second % period == 0) {
-            if try_expand(&mut sim, 1) { expansions += 1; }
+            if try_expand(&mut sim, 1) {
+                expansions += 1;
+            }
         }
         sim.step_dt(1.0);
-        if second + 1 == 60 { territory_at_60 = faction(&sim, 1).territory_count; }
-        if second + 1 == 300 { territory_at_300 = faction(&sim, 1).territory_count; }
+        if second + 1 == 60 {
+            territory_at_60 = faction(&sim, 1).territory_count;
+        }
+        if second + 1 == 300 {
+            territory_at_300 = faction(&sim, 1).territory_count;
+        }
         let f = faction(&sim, 1);
         if capacity_reached_at.is_none() && f.population >= f.population_capacity - 0.01 {
             capacity_reached_at = Some(second + 1);
@@ -107,16 +128,39 @@ fn profile(name: &str, duration_seconds: usize, action_period: Option<usize>) ->
         ("territoryAt60s".into(), territory_at_60.to_string()),
         ("territoryAt300s".into(), territory_at_300.to_string()),
         ("territoryFinal".into(), f.territory_count.to_string()),
-        ("controlledAreaKm2".into(), format!("{:.2}", f.controlled_area_km2)),
+        (
+            "controlledAreaKm2".into(),
+            format!("{:.2}", f.controlled_area_km2),
+        ),
         ("populationPool".into(), format!("{:.2}", f.population)),
-        ("livingPopulation".into(), format!("{:.2}", f.total_living_population)),
+        (
+            "livingPopulation".into(),
+            format!("{:.2}", f.total_living_population),
+        ),
         ("capacity".into(), format!("{:.2}", f.population_capacity)),
-        ("growthPerSecond".into(), format!("{:.4}", f.population_growth_per_second)),
+        (
+            "growthPerSecond".into(),
+            format!("{:.4}", f.population_growth_per_second),
+        ),
         ("expansions".into(), expansions.to_string()),
-        ("capacityReachedAtSeconds".into(), capacity_reached_at.map(|value| value.to_string()).unwrap_or_else(|| "never".into())),
+        (
+            "capacityReachedAtSeconds".into(),
+            capacity_reached_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "never".into()),
+        ),
     ]);
-    result.insert("capacityGap".into(), format!("{:.4}", (f.population_capacity - f.population).max(0.0)));
-    result.insert("growthPressure".into(), format!("{:.6}", (1.0 - f.total_living_population / f.population_capacity.max(1.0)).clamp(0.0, 1.0)));
+    result.insert(
+        "capacityGap".into(),
+        format!("{:.4}", (f.population_capacity - f.population).max(0.0)),
+    );
+    result.insert(
+        "growthPressure".into(),
+        format!(
+            "{:.6}",
+            (1.0 - f.total_living_population / f.population_capacity.max(1.0)).clamp(0.0, 1.0)
+        ),
+    );
     result.extend(trajectory_samples);
     result
 }
@@ -135,12 +179,16 @@ struct MatchResult {
     active_fronts: usize,
 }
 
-fn run_match(seed: u64, max_minutes: usize, special_doctrine: Option<(u8, [f32; 4])>) -> MatchResult {
-    // The product match is one custom human plus one hundred AI factions.
-    // Keep the audit on the same 101-faction topology; an 8-faction shortcut
-    // can hide opening-contact and pacing problems caused by the real sparse
-    // world distribution.
-    let mut sim = Simulation::with_seed(101, seed);
+fn run_match(
+    seed: u64,
+    max_minutes: usize,
+    special_doctrine: Option<(u8, [f32; 4])>,
+) -> MatchResult {
+    // The product match is the canonical 44-civilization roster: 43 AI
+    // civilizations plus the human-selected civilization. The older
+    // `with_seed(101, ...)` path is the legacy 101-faction audit generator
+    // and must never be used as gameplay economy evidence.
+    let mut sim = Simulation::new_standard(Some("roma"), seed);
     if let Some((id, doctrine)) = special_doctrine {
         if let Some(f) = sim.factions.iter_mut().find(|f| f.faction_id == id) {
             f.doctrine_offense = doctrine[0];
@@ -149,28 +197,62 @@ fn run_match(seed: u64, max_minutes: usize, special_doctrine: Option<(u8, [f32; 
             f.doctrine_maritime = doctrine[3];
         }
     }
-    let neutral_at_start = sim.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count() as f64
-        / sim.total_land_cells as f64 * 100.0;
-    let mut bots = BotManager::with_seed(100, seed.wrapping_add(1));
+    let neutral_at_start = sim
+        .cells
+        .iter()
+        .filter(|c| c.terrain_type == 0 && c.owner_id == 0)
+        .count() as f64
+        / sim.total_land_cells as f64
+        * 100.0;
+    let mut bots = BotManager::with_seed(43, seed.wrapping_add(1));
     let max_ticks = (max_minutes as u64) * 60 * 20;
     let mut first_contact_minutes = None;
     let mut first_war_minutes = None;
     for _ in 0..max_ticks {
         bots.generate_bot_actions(&mut sim);
         sim.step();
-        if first_contact_minutes.is_none() && sim.combat_manager.fronts.iter().any(|f| f.operation_kind == "CONTACT" || f.operation_kind == "LAND_OFFENSIVE") {
+        if first_contact_minutes.is_none()
+            && sim
+                .combat_manager
+                .fronts
+                .iter()
+                .any(|f| f.operation_kind == "CONTACT" || f.operation_kind == "LAND_OFFENSIVE")
+        {
             first_contact_minutes = Some(sim.tick as f64 / 1200.0);
         }
-        if first_war_minutes.is_none() && sim.combat_manager.fronts.iter().any(|f| f.is_combat_active) {
+        if first_war_minutes.is_none()
+            && sim.combat_manager.fronts.iter().any(|f| f.is_combat_active)
+        {
             first_war_minutes = Some(sim.tick as f64 / 1200.0);
         }
-        if sim.match_over { break; }
+        if sim.match_over {
+            break;
+        }
     }
-    let neutral_at_end = sim.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count() as f64
-        / sim.total_land_cells as f64 * 100.0;
-    let leader = sim.factions.iter().max_by_key(|f| f.territory_count).map(|f| f.faction_id).unwrap_or(0);
-    let alive_factions = sim.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
-    let active_fronts = sim.combat_manager.fronts.iter().filter(|front| front.is_combat_active).count();
+    let neutral_at_end = sim
+        .cells
+        .iter()
+        .filter(|c| c.terrain_type == 0 && c.owner_id == 0)
+        .count() as f64
+        / sim.total_land_cells as f64
+        * 100.0;
+    let leader = sim
+        .factions
+        .iter()
+        .max_by_key(|f| f.territory_count)
+        .map(|f| f.faction_id)
+        .unwrap_or(0);
+    let alive_factions = sim
+        .factions
+        .iter()
+        .filter(|f| !f.is_eliminated && f.territory_count > 0)
+        .count();
+    let active_fronts = sim
+        .combat_manager
+        .fronts
+        .iter()
+        .filter(|front| front.is_combat_active)
+        .count();
     MatchResult {
         seed,
         winner: sim.winner_faction_id,
@@ -185,29 +267,291 @@ fn run_match(seed: u64, max_minutes: usize, special_doctrine: Option<(u8, [f32; 
     }
 }
 
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) * 0.5
+    } else {
+        sorted[mid]
+    }
+}
+
+fn canonical_operation_count(sim: &Simulation) -> u64 {
+    // Expansion ids and combat front ids are monotonic authoritative ids.
+    // Contacts also allocate a front id, which is intentionally included: the
+    // metric is total operation/front creation, not only successful captures.
+    sim.next_expansion_id.saturating_sub(1) as u64
+        + sim.combat_manager.next_front_id.saturating_sub(1) as u64
+}
+
+fn print_canonical_snapshot(sim: &Simulation, seconds: usize) {
+    let populations: Vec<f64> = sim.factions.iter().map(|f| f.population).collect();
+    let territories: Vec<f64> = sim
+        .factions
+        .iter()
+        .map(|f| f.territory_count as f64)
+        .collect();
+    let growths: Vec<f64> = sim
+        .factions
+        .iter()
+        .map(|f| f.population_growth_per_second)
+        .collect();
+    let alive = sim
+        .factions
+        .iter()
+        .filter(|f| !f.is_eliminated && f.territory_count > 0)
+        .count();
+    let eliminations = sim.factions.len().saturating_sub(alive);
+    println!(
+        concat!(
+            "canonical_t={}s roster={} alive={} eliminations={} ",
+            "population_min={:.2} population_median={:.2} population_max={:.2} ",
+            "territory_min={:.0} territory_median={:.2} territory_max={:.0} ",
+            "growth_min={:.4} growth_median={:.4} growth_max={:.4} operations={}"
+        ),
+        seconds,
+        sim.factions.len(),
+        alive,
+        eliminations,
+        populations.iter().copied().fold(f64::INFINITY, f64::min),
+        median(&populations),
+        populations
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+        territories.iter().copied().fold(f64::INFINITY, f64::min),
+        median(&territories),
+        territories
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max),
+        growths.iter().copied().fold(f64::INFINITY, f64::min),
+        median(&growths),
+        growths.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        canonical_operation_count(sim),
+    );
+}
+
+fn run_canonical_population_audit(seed: u64, duration_seconds: usize) {
+    let mut sim = Simulation::new_standard(Some("roma"), seed);
+    let mut bots = BotManager::with_seed(43, seed.wrapping_add(1));
+    let checkpoints = [0usize, 30, 60, 120, 300, 600];
+    let max_seconds = duration_seconds.max(*checkpoints.last().unwrap());
+
+    println!(
+        "canonical_match seed={} roster={} human={} startPopulation={:.2} startConfig=standard_44_civilizations",
+        seed,
+        sim.factions.len(),
+        sim.factions.iter().find(|f| f.is_human).map(|f| f.faction_id).unwrap_or(0),
+        sim.factions.iter().find(|f| f.is_human).map(|f| f.population).unwrap_or(0.0),
+    );
+    print_canonical_snapshot(&sim, 0);
+
+    let mut next_checkpoint = 1usize;
+    for tick in 1..=(max_seconds as u64 * 20) {
+        bots.generate_bot_actions(&mut sim);
+        sim.step();
+        let elapsed_seconds = (tick / 20) as usize;
+        while next_checkpoint < checkpoints.len() && elapsed_seconds >= checkpoints[next_checkpoint]
+        {
+            print_canonical_snapshot(&sim, checkpoints[next_checkpoint]);
+            next_checkpoint += 1;
+        }
+        if sim.match_over && next_checkpoint >= checkpoints.len() {
+            break;
+        }
+    }
+}
+
+fn run_controlled_growth_audit(seed: u64) {
+    let mut baseline_growth = None;
+    for multiplier in [1usize, 2, 4] {
+        let mut sim = Simulation::new_standard(Some("roma"), seed);
+        let human_index = sim
+            .factions
+            .iter()
+            .position(|f| f.is_human)
+            .expect("human faction");
+        let base_territory = sim.factions[human_index].territory_count.max(1);
+        sim.factions[human_index].territory_count =
+            base_territory.saturating_mul(multiplier as u32);
+        sim.refresh_all_economies();
+        let before = sim.factions[human_index].population;
+        let growth = sim.factions[human_index].population_growth_per_second;
+        let breakdown = Simulation::population_growth_breakdown(&sim.factions[human_index]);
+        sim.step_dt(1.0);
+        let effective_delta = sim.factions[human_index].population - before;
+        let reference = baseline_growth.get_or_insert(growth);
+        println!(
+            "controlled_growth territory={}x reserveComponent={:.6} territoryComponent={:.6} saturationFactor={:.6} capacity={:.2} finalComponent={:.6} growthPerSecond={:.6} effectivePopulationDelta1s={:.6} ratioTo1x={:.6}",
+            multiplier,
+            breakdown.reserve_component,
+            breakdown.territory_component,
+            breakdown.saturation_factor,
+            breakdown.population_capacity,
+            breakdown.final_component,
+            growth,
+            effective_delta,
+            growth / *reference,
+        );
+    }
+}
+
+fn open_grid_cost_fixture() -> (Simulation, u32) {
+    let mut sim = Simulation::new(2);
+    for cell in &mut sim.cells {
+        cell.owner_id = 0;
+        cell.terrain_type = 0;
+    }
+    let cap = 250 * world_map::WORLD_WIDTH + 500;
+    sim.cells[cap].owner_id = 1;
+    sim.cell_consolidation[cap] = 1.0;
+    sim.factions[0].capital_cell = cap as u32;
+    sim.factions[0].territory_count = 1;
+    sim.factions[0].population = 10_000.0;
+    sim.factions[0].total_living_population = 10_000.0;
+    sim.recompute_area_stats();
+    sim.refresh_all_economies();
+    (sim, cap as u32)
+}
+
+fn print_cost_row(
+    kind: &str,
+    before: f64,
+    committed: f64,
+    after_commit: f64,
+    after_completion: f64,
+) {
+    println!(
+        "permanent_cost kind={} population_before={:.2} commit={:.2} population_immediately_after={:.2} population_after_completion_no_growth={:.2} permanent_spent={}",
+        kind,
+        before,
+        committed,
+        after_commit,
+        after_completion,
+        (before - after_completion) >= committed - 0.01,
+    );
+}
+
+fn run_permanent_population_cost_audit() {
+    for mode in ["FOCUS", "FRONTIER"] {
+        let (mut sim, cap) = open_grid_cost_fixture();
+        let before = sim.factions[0].population;
+        let outcome = sim
+            .process_expand_command_with_mode(1, cap + 1, mode, Some(0.12))
+            .expect("expansion");
+        let committed = outcome.population_cost;
+        let after_commit = sim.factions[0].population;
+        sim.flush_pending_advances();
+        let after_completion = sim.factions[0].population;
+        print_cost_row(mode, before, committed, after_commit, after_completion);
+    }
+
+    let (mut sim, cap) = open_grid_cost_fixture();
+    sim.cells[(cap + 1) as usize].owner_id = 2;
+    sim.factions[1].capital_cell = cap + 1;
+    sim.factions[1].territory_count = 1;
+    sim.factions[1].population = 10_000.0;
+    sim.factions[1].total_living_population = 10_000.0;
+    sim.recompute_area_stats();
+    sim.refresh_all_economies();
+    sim.macro_phase = MacroPhase::WarEra;
+    let before = sim.factions[0].population;
+    let attack = sim
+        .process_attack_command_with_intent(1, cap, cap + 1, Some(cap + 1), 0.20)
+        .expect("hostile attack");
+    let committed = attack.deployed_population;
+    let after_commit = sim.factions[0].population;
+    let front_index = sim
+        .combat_manager
+        .fronts
+        .iter()
+        .position(|front| front.front_id == attack.front_id)
+        .unwrap();
+    sim.combat_manager.fronts[front_index].is_combat_active = false;
+    sim.step_dt(0.0);
+    let after_completion = sim.factions[0].population;
+    print_cost_row(
+        "HOSTILE_LOCAL_ATTACK",
+        before,
+        committed,
+        after_commit,
+        after_completion,
+    );
+
+    let (mut sim, cap) = open_grid_cost_fixture();
+    sim.cells[(cap + 1) as usize].owner_id = 2;
+    sim.factions[1].capital_cell = cap + 1;
+    sim.factions[1].territory_count = 1;
+    sim.factions[1].population = 10_000.0;
+    sim.factions[1].total_living_population = 10_000.0;
+    sim.recompute_area_stats();
+    sim.refresh_all_economies();
+    sim.macro_phase = MacroPhase::WarEra;
+    let attack = sim
+        .process_attack_command_with_intent(1, cap, cap + 1, Some(cap + 1), 0.20)
+        .expect("reinforce setup");
+    let before = sim.factions[0].population;
+    let committed = sim
+        .reinforce_front(1, attack.front_id, 0.20)
+        .expect("reinforce");
+    let after_commit = sim.factions[0].population;
+    let front_index = sim
+        .combat_manager
+        .fronts
+        .iter()
+        .position(|front| front.front_id == attack.front_id)
+        .unwrap();
+    sim.combat_manager.fronts[front_index].is_combat_active = false;
+    sim.step_dt(0.0);
+    let after_completion = sim.factions[0].population;
+    print_cost_row(
+        "REINFORCE",
+        before,
+        committed,
+        after_commit,
+        after_completion,
+    );
+}
+
 fn main() {
     println!("DOMINION POPULATION AUDIT");
     println!("presets={}", factions::nation_preset_count());
-    let passive_seconds = std::env::var("DOMINION_AUDIT_PASSIVE_SECONDS")
+    let canonical_seed = std::env::var("DOMINION_CANONICAL_AUDIT_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(42);
+    let canonical_seconds = std::env::var("DOMINION_CANONICAL_AUDIT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(12_000);
-    for row in [
-        profile("RAPID_EXPANDER", 900, Some(5)),
-        profile("CONSOLIDATOR", 900, Some(20)),
-        profile("PASSIVE", passive_seconds, None),
-    ] {
-        println!("profile={}", row.get("profile").unwrap());
-        for (key, value) in row.iter().filter(|(key, _)| key.as_str() != "profile") {
-            println!("  {}={}", key, value);
-        }
-    }
+        .unwrap_or(600);
+    println!("audit_environment=canonical_44_civilization");
+    run_canonical_population_audit(canonical_seed, canonical_seconds);
+    run_controlled_growth_audit(canonical_seed);
+    run_permanent_population_cost_audit();
 
     let doctrine_cases = [
-        ("MAX_OFFENSE", factions::normalize_doctrine(0.06, -0.02, -0.02, -0.02)),
-        ("MAX_DEFENSE", factions::normalize_doctrine(-0.02, 0.06, -0.02, -0.02)),
-        ("MAX_EXPANSION", factions::normalize_doctrine(-0.02, -0.02, 0.06, -0.02)),
-        ("MAX_MARITIME", factions::normalize_doctrine(-0.02, -0.02, -0.02, 0.06)),
+        (
+            "MAX_OFFENSE",
+            factions::normalize_doctrine(0.06, -0.02, -0.02, -0.02),
+        ),
+        (
+            "MAX_DEFENSE",
+            factions::normalize_doctrine(-0.02, 0.06, -0.02, -0.02),
+        ),
+        (
+            "MAX_EXPANSION",
+            factions::normalize_doctrine(-0.02, -0.02, 0.06, -0.02),
+        ),
+        (
+            "MAX_MARITIME",
+            factions::normalize_doctrine(-0.02, -0.02, -0.02, 0.06),
+        ),
     ];
     let balance_runs = std::env::var("DOMINION_AUDIT_BALANCE_RUNS")
         .ok()
@@ -222,7 +566,10 @@ fn main() {
     let skip_extremes = std::env::var("DOMINION_AUDIT_SKIP_EXTREMES")
         .ok()
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-    println!("balance_runs={} seeds=1..{} maxMinutes={}", balance_runs, balance_runs, max_minutes);
+    println!(
+        "balance_runs={} seeds=1..{} maxMinutes={}",
+        balance_runs, balance_runs, max_minutes
+    );
     let started = std::time::Instant::now();
     let mut results = Vec::new();
     for seed in 1..=balance_runs {
@@ -234,17 +581,38 @@ fn main() {
         println!("extreme_runs=skipped");
     } else {
         for (label, doctrine) in doctrine_cases {
-            let result = run_match(100 + doctrine[0].to_bits() as u64 + doctrine[1].to_bits() as u64, max_minutes, Some((1, doctrine)));
-            println!("extreme={} doctrine={:?} winner={:?} complete={} durationMinutes={:.2} leader={}", label, doctrine, result.winner, result.winner.is_some(), result.duration_minutes, result.territory_leader);
+            let result = run_match(
+                100 + doctrine[0].to_bits() as u64 + doctrine[1].to_bits() as u64,
+                max_minutes,
+                Some((1, doctrine)),
+            );
+            println!(
+                "extreme={} doctrine={:?} winner={:?} complete={} durationMinutes={:.2} leader={}",
+                label,
+                doctrine,
+                result.winner,
+                result.winner.is_some(),
+                result.duration_minutes,
+                result.territory_leader
+            );
         }
     }
     let durations: Vec<f64> = results.iter().map(|r| r.duration_minutes).collect();
-    println!("matchDurationMinutes_min={:.2} median={:.2} p75={:.2} p90={:.2} max={:.2}", percentile(&durations, 0.0), percentile(&durations, 0.5), percentile(&durations, 0.75), percentile(&durations, 0.90), percentile(&durations, 1.0));
+    println!(
+        "matchDurationMinutes_min={:.2} median={:.2} p75={:.2} p90={:.2} max={:.2}",
+        percentile(&durations, 0.0),
+        percentile(&durations, 0.5),
+        percentile(&durations, 0.75),
+        percentile(&durations, 0.90),
+        percentile(&durations, 1.0)
+    );
     println!("auditElapsedSeconds={:.2}", started.elapsed().as_secs_f64());
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {
-    if values.is_empty() { return 0.0; }
+    if values.is_empty() {
+        return 0.0;
+    }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.total_cmp(b));
     let index = p.clamp(0.0, 1.0) * (sorted.len().saturating_sub(1) as f64);

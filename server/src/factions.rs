@@ -1,10 +1,12 @@
 use crate::balance::*;
-use crate::civilizations::{get_canonical_civilization, CANONICAL_CIVILIZATIONS, CanonicalCivilization};
+use crate::civilizations::{
+    get_canonical_civilization, CanonicalCivilization, CANONICAL_CIVILIZATIONS,
+};
 use crate::protocol::{FactionInfo, FlagDescriptor};
 use crate::world_map::{WORLD_HEIGHT, WORLD_WIDTH};
-use std::collections::{HashSet, VecDeque};
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use std::collections::{HashSet, VecDeque};
 
 fn connected_land_capacity(mask: &[u8], start: usize, limit: usize) -> usize {
     if mask.get(start) != Some(&0) {
@@ -39,51 +41,147 @@ fn connected_land_capacity(mask: &[u8], start: usize, limit: usize) -> usize {
 // Designed in CIELAB/OKLCH perceptual space: calibrated saturation (35-65%),
 // balanced lightness (28-55%), distinct hues, no neon/candy board-game tones.
 const FACTION_HEX_PALETTE: &[(&str, u32)] = &[
-    ("#2C4D6F", 0x2C4D6F), ("#7C2D2D", 0x7C2D2D), ("#3F4D34", 0x3F4D34), ("#784C36", 0x784C36),
-    ("#424D54", 0x424D54), ("#3D566E", 0x3D566E), ("#7A5E38", 0x7A5E38), ("#2E5241", 0x2E5241),
-    ("#523D57", 0x523D57), ("#634C38", 0x634C38), ("#2C5252", 0x2C5252), ("#7A6331", 0x7A6331),
-    ("#853838", 0x853838), ("#384E63", 0x384E63), ("#4D5E3F", 0x4D5E3F), ("#6E432F", 0x6E432F),
-    ("#476480", 0x476480), ("#6B2228", 0x6B2228), ("#566946", 0x566946), ("#704D36", 0x704D36),
-    ("#356161", 0x356161), ("#5F4665", 0x5F4665), ("#735841", 0x735841), ("#406E57", 0x406E57),
-    ("#8C6C40", 0x8C6C40), ("#53636D", 0x53636D), ("#943E3E", 0x943E3E), ("#1E405B", 0x1E405B),
-    ("#4A5A3A", 0x4A5A3A), ("#805037", 0x805037), ("#527394", 0x527394), ("#66212B", 0x66212B),
-    ("#2B5876", 0x2B5876), ("#8B2500", 0x8B2500), ("#3B5323", 0x3B5323), ("#8B4513", 0x8B4513),
-    ("#4A5459", 0x4A5459), ("#4682B4", 0x4682B4), ("#996515", 0x996515), ("#2D4A22", 0x2D4A22),
+    ("#2C4D6F", 0x2C4D6F),
+    ("#7C2D2D", 0x7C2D2D),
+    ("#3F4D34", 0x3F4D34),
+    ("#784C36", 0x784C36),
+    ("#424D54", 0x424D54),
+    ("#3D566E", 0x3D566E),
+    ("#7A5E38", 0x7A5E38),
+    ("#2E5241", 0x2E5241),
+    ("#523D57", 0x523D57),
+    ("#634C38", 0x634C38),
+    ("#2C5252", 0x2C5252),
+    ("#7A6331", 0x7A6331),
+    ("#853838", 0x853838),
+    ("#384E63", 0x384E63),
+    ("#4D5E3F", 0x4D5E3F),
+    ("#6E432F", 0x6E432F),
+    ("#476480", 0x476480),
+    ("#6B2228", 0x6B2228),
+    ("#566946", 0x566946),
+    ("#704D36", 0x704D36),
+    ("#356161", 0x356161),
+    ("#5F4665", 0x5F4665),
+    ("#735841", 0x735841),
+    ("#406E57", 0x406E57),
+    ("#8C6C40", 0x8C6C40),
+    ("#53636D", 0x53636D),
+    ("#943E3E", 0x943E3E),
+    ("#1E405B", 0x1E405B),
+    ("#4A5A3A", 0x4A5A3A),
+    ("#805037", 0x805037),
+    ("#527394", 0x527394),
+    ("#66212B", 0x66212B),
+    ("#2B5876", 0x2B5876),
+    ("#8B2500", 0x8B2500),
+    ("#3B5323", 0x3B5323),
+    ("#8B4513", 0x8B4513),
+    ("#4A5459", 0x4A5459),
+    ("#4682B4", 0x4682B4),
+    ("#996515", 0x996515),
+    ("#2D4A22", 0x2D4A22),
     // Curated Military Atlas Palette across 16 distinct hue families:
     // Burgundy, Rust, Ochre, Sand, Olive, Sage, Petrol, Dusty Blue, Slate Blue,
     // Indigo, Violet, Plum, Umber, Crimson, Marine, Sienna
-    ("#8B1E3F", 0x8B1E3F), ("#A24823", 0xA24823), ("#C68628", 0xC68628), ("#3E6F8E", 0x3E6F8E),
-    ("#5E4B72", 0x5E4B72), ("#1A5B66", 0x1A5B66), ("#6F3556", 0x6F3556), ("#A68A56", 0xA68A56),
-    ("#2B3E68", 0x2B3E68), ("#A53232", 0xA53232), ("#4F677E", 0x4F677E), ("#8F5436", 0x8F5436),
-    ("#6B8272", 0x6B8272), ("#9C2A3E", 0x9C2A3E), ("#B25026", 0xB25026), ("#B8731F", 0xB8731F),
-    ("#356584", 0x356584), ("#544267", 0x544267), ("#16535E", 0x16535E), ("#632E4C", 0x632E4C),
-    ("#9C804B", 0x9C804B), ("#24365C", 0x24365C), ("#992B2B", 0x992B2B), ("#465E74", 0x465E74),
-    ("#834B2F", 0x834B2F), ("#5E7A6B", 0x5E7A6B), ("#78281F", 0x78281F), ("#C05C32", 0xC05C32),
-    ("#C4923E", 0xC4923E), ("#467B9D", 0x467B9D), ("#6A5680", 0x6A5680), ("#1F6877", 0x1F6877),
-    ("#7B3D61", 0x7B3D61), ("#B59A65", 0xB59A65), ("#324775", 0x324775), ("#B03D3D", 0xB03D3D),
-    ("#59738C", 0x59738C), ("#9D5E3E", 0x9D5E3E), ("#748B7C", 0x748B7C), ("#9E2A2B", 0x9E2A2B),
-    ("#9E472A", 0x9E472A), ("#AA7028", 0xAA7028), ("#2E5B78", 0x2E5B78), ("#4B3A5D", 0x4B3A5D),
-    ("#124B54", 0x124B54), ("#582743", 0x582743), ("#8E7542", 0x8E7542), ("#1E2D4F", 0x1E2D4F),
-    ("#8C2424", 0x8C2424), ("#3D5469", 0x3D5469), ("#774127", 0x774127), ("#556B2F", 0x556B2F),
-    ("#801818", 0x801818), ("#8C3A27", 0x8C3A27), ("#D49B35", 0xD49B35), ("#417290", 0x417290),
-    ("#624F76", 0x624F76), ("#1B606D", 0x1B606D), ("#73385A", 0x73385A), ("#A0834E", 0xA0834E),
-    ("#283B64", 0x283B64), ("#6E5848", 0x6E5848), ("#526D85", 0x526D85), ("#2B6D74", 0x2B6D74),
-    ("#5D6E32", 0x5D6E32), ("#8A2846", 0x8A2846), ("#B85D35", 0xB85D35), ("#996820", 0x996820),
-    ("#236269", 0x236269), ("#624D3D", 0x624D3D), ("#347B83", 0x347B83), ("#4E5F28", 0x4E5F28),
+    ("#8B1E3F", 0x8B1E3F),
+    ("#A24823", 0xA24823),
+    ("#C68628", 0xC68628),
+    ("#3E6F8E", 0x3E6F8E),
+    ("#5E4B72", 0x5E4B72),
+    ("#1A5B66", 0x1A5B66),
+    ("#6F3556", 0x6F3556),
+    ("#A68A56", 0xA68A56),
+    ("#2B3E68", 0x2B3E68),
+    ("#A53232", 0xA53232),
+    ("#4F677E", 0x4F677E),
+    ("#8F5436", 0x8F5436),
+    ("#6B8272", 0x6B8272),
+    ("#9C2A3E", 0x9C2A3E),
+    ("#B25026", 0xB25026),
+    ("#B8731F", 0xB8731F),
+    ("#356584", 0x356584),
+    ("#544267", 0x544267),
+    ("#16535E", 0x16535E),
+    ("#632E4C", 0x632E4C),
+    ("#9C804B", 0x9C804B),
+    ("#24365C", 0x24365C),
+    ("#992B2B", 0x992B2B),
+    ("#465E74", 0x465E74),
+    ("#834B2F", 0x834B2F),
+    ("#5E7A6B", 0x5E7A6B),
+    ("#78281F", 0x78281F),
+    ("#C05C32", 0xC05C32),
+    ("#C4923E", 0xC4923E),
+    ("#467B9D", 0x467B9D),
+    ("#6A5680", 0x6A5680),
+    ("#1F6877", 0x1F6877),
+    ("#7B3D61", 0x7B3D61),
+    ("#B59A65", 0xB59A65),
+    ("#324775", 0x324775),
+    ("#B03D3D", 0xB03D3D),
+    ("#59738C", 0x59738C),
+    ("#9D5E3E", 0x9D5E3E),
+    ("#748B7C", 0x748B7C),
+    ("#9E2A2B", 0x9E2A2B),
+    ("#9E472A", 0x9E472A),
+    ("#AA7028", 0xAA7028),
+    ("#2E5B78", 0x2E5B78),
+    ("#4B3A5D", 0x4B3A5D),
+    ("#124B54", 0x124B54),
+    ("#582743", 0x582743),
+    ("#8E7542", 0x8E7542),
+    ("#1E2D4F", 0x1E2D4F),
+    ("#8C2424", 0x8C2424),
+    ("#3D5469", 0x3D5469),
+    ("#774127", 0x774127),
+    ("#556B2F", 0x556B2F),
+    ("#801818", 0x801818),
+    ("#8C3A27", 0x8C3A27),
+    ("#D49B35", 0xD49B35),
+    ("#417290", 0x417290),
+    ("#624F76", 0x624F76),
+    ("#1B606D", 0x1B606D),
+    ("#73385A", 0x73385A),
+    ("#A0834E", 0xA0834E),
+    ("#283B64", 0x283B64),
+    ("#6E5848", 0x6E5848),
+    ("#526D85", 0x526D85),
+    ("#2B6D74", 0x2B6D74),
+    ("#5D6E32", 0x5D6E32),
+    ("#8A2846", 0x8A2846),
+    ("#B85D35", 0xB85D35),
+    ("#996820", 0x996820),
+    ("#236269", 0x236269),
+    ("#624D3D", 0x624D3D),
+    ("#347B83", 0x347B83),
+    ("#4E5F28", 0x4E5F28),
 ];
 
 fn rgb_to_lab(rgb: u32) -> (f32, f32, f32) {
     let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
     let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
     let b = (rgb & 0xFF) as f32 / 255.0;
-    let to_linear = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let to_linear = |c: f32| {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
     let lr = to_linear(r);
     let lg = to_linear(g);
     let lb = to_linear(b);
     let x = (0.4124564 * lr + 0.3575761 * lg + 0.1804375 * lb) / 0.95047;
     let y = 0.2126729 * lr + 0.7151522 * lg + 0.0721750 * lb;
     let z = (0.0193339 * lr + 0.1191920 * lg + 0.9503041 * lb) / 1.08883;
-    let f = |t: f32| if t > 0.008856 { t.cbrt() } else { 7.787 * t + 16.0 / 116.0 };
+    let f = |t: f32| {
+        if t > 0.008856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
     let fx = f(x);
     let fy = f(y);
     let fz = f(z);
@@ -97,7 +195,10 @@ fn delta_e_cielab(lab1: (f32, f32, f32), lab2: (f32, f32, f32)) -> f32 {
     (dl * dl + da * da + db * db).sqrt()
 }
 
-fn allocate_spatial_colors(capitals: &[(usize, usize, usize)], human_color: Option<u32>) -> Vec<(&'static str, u32)> {
+fn allocate_spatial_colors(
+    capitals: &[(usize, usize, usize)],
+    human_color: Option<u32>,
+) -> Vec<(&'static str, u32)> {
     let n = capitals.len();
     let mut assigned: Vec<Option<usize>> = vec![None; n];
     let mut used_palette_indices = std::collections::HashSet::new();
@@ -114,7 +215,9 @@ fn allocate_spatial_colors(capitals: &[(usize, usize, usize)], human_color: Opti
     }
 
     for i in 0..n {
-        if assigned[i].is_some() { continue; }
+        if assigned[i].is_some() {
+            continue;
+        }
         let (x_i, y_i, _) = capitals[i];
         let x_i = x_i as f32;
         let y_i = y_i as f32;
@@ -123,7 +226,9 @@ fn allocate_spatial_colors(capitals: &[(usize, usize, usize)], human_color: Opti
         let mut best_score = -1.0f32;
 
         for (pal_idx, &pal_lab) in palette_labs.iter().enumerate() {
-            if used_palette_indices.contains(&pal_idx) && used_palette_indices.len() < FACTION_HEX_PALETTE.len() {
+            if used_palette_indices.contains(&pal_idx)
+                && used_palette_indices.len() < FACTION_HEX_PALETTE.len()
+            {
                 continue;
             }
 
@@ -136,7 +241,9 @@ fn allocate_spatial_colors(capitals: &[(usize, usize, usize)], human_color: Opti
                     let x_j = x_j as f32;
                     let y_j = y_j as f32;
                     let mut dx = (x_i - x_j).abs();
-                    if dx > 512.0 { dx = 1024.0 - dx; }
+                    if dx > 512.0 {
+                        dx = 1024.0 - dx;
+                    }
                     let dy = (y_i - y_j).abs();
                     let world_dist = (dx * dx + dy * dy).sqrt().max(1.0);
                     // Weight de higher if physically close
@@ -245,35 +352,167 @@ struct NationPreset {
 // to six percentage points. Homeland is identity metadata for the preset;
 // ownership remains generated from the authoritative land mask.
 const NATION_PRESETS: &[NationPreset] = &[
-    NationPreset { id: "sol_core", homeland: "Aegean Core", flag_id: "flag_sol", layout: "horizontalBicolor", primary: "#3B82F6", secondary: "#07131C", accent: "#A7F3D0", emblem: "sun", offense: 0.015, defense: -0.005, expansion: -0.005, maritime: -0.005 },
-    NationPreset { id: "vanguard", homeland: "Central Europe", flag_id: "flag_vanguard", layout: "verticalBicolor", primary: "#EF4444", secondary: "#190B12", accent: "#FDE68A", emblem: "shield", offense: 0.020, defense: 0.010, expansion: -0.015, maritime: -0.015 },
-    NationPreset { id: "verdant", homeland: "Equatorial Basin", flag_id: "flag_verdant", layout: "horizontalTricolor", primary: "#10B981", secondary: "#08251F", accent: "#D1FAE5", emblem: "circle", offense: -0.010, defense: -0.005, expansion: 0.025, maritime: -0.010 },
-    NationPreset { id: "solaris", homeland: "Southern Steppe", flag_id: "flag_solaris", layout: "diagonal", primary: "#F59E0B", secondary: "#271A05", accent: "#FEF3C7", emblem: "star", offense: 0.010, defense: -0.010, expansion: 0.010, maritime: -0.010 },
-    NationPreset { id: "aether", homeland: "Highland Arc", flag_id: "flag_aether", layout: "verticalTricolor", primary: "#8B5CF6", secondary: "#171027", accent: "#DDD6FE", emblem: "diamond", offense: -0.005, defense: 0.020, expansion: -0.005, maritime: -0.010 },
-    NationPreset { id: "nordic", homeland: "Northern Shelf", flag_id: "flag_nordic", layout: "cross", primary: "#06B6D4", secondary: "#071C29", accent: "#CFFAFE", emblem: "none", offense: -0.005, defense: 0.010, expansion: -0.010, maritime: 0.005 },
-    NationPreset { id: "maritime", homeland: "Pacific Rim", flag_id: "flag_maritime", layout: "chevron", primary: "#0EA5E9", secondary: "#061826", accent: "#BAE6FD", emblem: "crescent", offense: -0.010, defense: -0.005, expansion: -0.005, maritime: 0.020 },
-    NationPreset { id: "frontier", homeland: "Continental Frontier", flag_id: "flag_frontier", layout: "horizontalBicolor", primary: "#D97706", secondary: "#211305", accent: "#FED7AA", emblem: "eagle", offense: 0.005, defense: -0.005, expansion: 0.015, maritime: -0.015 },
+    NationPreset {
+        id: "sol_core",
+        homeland: "Aegean Core",
+        flag_id: "flag_sol",
+        layout: "horizontalBicolor",
+        primary: "#3B82F6",
+        secondary: "#07131C",
+        accent: "#A7F3D0",
+        emblem: "sun",
+        offense: 0.015,
+        defense: -0.005,
+        expansion: -0.005,
+        maritime: -0.005,
+    },
+    NationPreset {
+        id: "vanguard",
+        homeland: "Central Europe",
+        flag_id: "flag_vanguard",
+        layout: "verticalBicolor",
+        primary: "#EF4444",
+        secondary: "#190B12",
+        accent: "#FDE68A",
+        emblem: "shield",
+        offense: 0.020,
+        defense: 0.010,
+        expansion: -0.015,
+        maritime: -0.015,
+    },
+    NationPreset {
+        id: "verdant",
+        homeland: "Equatorial Basin",
+        flag_id: "flag_verdant",
+        layout: "horizontalTricolor",
+        primary: "#10B981",
+        secondary: "#08251F",
+        accent: "#D1FAE5",
+        emblem: "circle",
+        offense: -0.010,
+        defense: -0.005,
+        expansion: 0.025,
+        maritime: -0.010,
+    },
+    NationPreset {
+        id: "solaris",
+        homeland: "Southern Steppe",
+        flag_id: "flag_solaris",
+        layout: "diagonal",
+        primary: "#F59E0B",
+        secondary: "#271A05",
+        accent: "#FEF3C7",
+        emblem: "star",
+        offense: 0.010,
+        defense: -0.010,
+        expansion: 0.010,
+        maritime: -0.010,
+    },
+    NationPreset {
+        id: "aether",
+        homeland: "Highland Arc",
+        flag_id: "flag_aether",
+        layout: "verticalTricolor",
+        primary: "#8B5CF6",
+        secondary: "#171027",
+        accent: "#DDD6FE",
+        emblem: "diamond",
+        offense: -0.005,
+        defense: 0.020,
+        expansion: -0.005,
+        maritime: -0.010,
+    },
+    NationPreset {
+        id: "nordic",
+        homeland: "Northern Shelf",
+        flag_id: "flag_nordic",
+        layout: "cross",
+        primary: "#06B6D4",
+        secondary: "#071C29",
+        accent: "#CFFAFE",
+        emblem: "none",
+        offense: -0.005,
+        defense: 0.010,
+        expansion: -0.010,
+        maritime: 0.005,
+    },
+    NationPreset {
+        id: "maritime",
+        homeland: "Pacific Rim",
+        flag_id: "flag_maritime",
+        layout: "chevron",
+        primary: "#0EA5E9",
+        secondary: "#061826",
+        accent: "#BAE6FD",
+        emblem: "crescent",
+        offense: -0.010,
+        defense: -0.005,
+        expansion: -0.005,
+        maritime: 0.020,
+    },
+    NationPreset {
+        id: "frontier",
+        homeland: "Continental Frontier",
+        flag_id: "flag_frontier",
+        layout: "horizontalBicolor",
+        primary: "#D97706",
+        secondary: "#211305",
+        accent: "#FED7AA",
+        emblem: "eagle",
+        offense: 0.005,
+        defense: -0.005,
+        expansion: 0.015,
+        maritime: -0.015,
+    },
 ];
 
-pub fn nation_preset_count() -> usize { NATION_PRESETS.len() }
+pub fn nation_preset_count() -> usize {
+    NATION_PRESETS.len()
+}
 
 pub fn valid_flag_descriptor(descriptor: &FlagDescriptor) -> bool {
-    let layouts = ["solid", "horizontalBicolor", "horizontalTricolor", "verticalBicolor", "verticalTricolor", "cross", "diagonal", "chevron"];
-    let emblems = ["none", "star", "circle", "sun", "crescent", "diamond", "shield", "eagle"];
+    let layouts = [
+        "solid",
+        "horizontalBicolor",
+        "horizontalTricolor",
+        "verticalBicolor",
+        "verticalTricolor",
+        "cross",
+        "diagonal",
+        "chevron",
+    ];
+    let emblems = [
+        "none", "star", "circle", "sun", "crescent", "diamond", "shield", "eagle",
+    ];
     layouts.contains(&descriptor.layout.as_str())
         && emblems.contains(&descriptor.emblem.as_str())
-        && [&descriptor.primary_color, &descriptor.secondary_color, &descriptor.accent_color]
-            .into_iter()
-            .all(|color| color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit()))
+        && [
+            &descriptor.primary_color,
+            &descriptor.secondary_color,
+            &descriptor.accent_color,
+        ]
+        .into_iter()
+        .all(|color| {
+            color.len() == 7
+                && color.starts_with('#')
+                && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+        })
 }
 
 pub fn normalize_doctrine(offense: f32, defense: f32, expansion: f32, maritime: f32) -> [f32; 4] {
     let mut values = [offense, defense, expansion, maritime].map(|value| value.clamp(-0.06, 0.06));
     let mean = values.iter().sum::<f32>() / values.len() as f32;
-    for value in &mut values { *value -= mean; }
-    let max_abs = values.iter().map(|value| value.abs()).fold(0.0_f32, f32::max);
+    for value in &mut values {
+        *value -= mean;
+    }
+    let max_abs = values
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f32, f32::max);
     if max_abs > 0.06 {
-        for value in &mut values { *value *= 0.06 / max_abs; }
+        for value in &mut values {
+            *value *= 0.06 / max_abs;
+        }
     }
     values
 }
@@ -315,9 +554,8 @@ pub fn generate_100_factions(land_mask: &[u8], count: usize, match_seed: u64) ->
     let mut sol_cap = land_cells[0];
     let mut best_dist = f64::MAX;
     for &cell in &land_cells {
-        let d = ((cell.0 as f64 - sol_target_x).powi(2)
-            + (cell.1 as f64 - sol_target_y).powi(2))
-        .sqrt();
+        let d = ((cell.0 as f64 - sol_target_x).powi(2) + (cell.1 as f64 - sol_target_y).powi(2))
+            .sqrt();
         if d < best_dist {
             best_dist = d;
             sol_cap = cell;
@@ -355,7 +593,7 @@ pub fn generate_100_factions(land_mask: &[u8], count: usize, match_seed: u64) ->
                 // Add noise to the distance calculation to randomize the candidates based on seed
                 let noise: f64 = rng.gen_range(0.85..1.0);
                 let score = min_d * noise;
-                
+
                 if score > max_min_dist {
                     max_min_dist = score;
                     best_candidate = Some(candidate);
@@ -374,7 +612,10 @@ pub fn generate_100_factions(land_mask: &[u8], count: usize, match_seed: u64) ->
         }
     }
 
-    let allocated_colors = allocate_spatial_colors(&chosen_capitals, if custom_match { Some(0x3B82F6) } else { None });
+    let allocated_colors = allocate_spatial_colors(
+        &chosen_capitals,
+        if custom_match { Some(0x3B82F6) } else { None },
+    );
 
     // Build FactionInfo structs
     for (i, cap) in chosen_capitals.iter().enumerate() {
@@ -404,9 +645,22 @@ pub fn generate_100_factions(land_mask: &[u8], count: usize, match_seed: u64) ->
             allocated_colors[i]
         };
 
-        let preset = if is_human { NATION_PRESETS[0] } else { NATION_PRESETS[i % NATION_PRESETS.len()] };
-        let flag_id = if is_human { "flag_sol".to_string() } else { preset.flag_id.to_string() };
-        let doctrine = normalize_doctrine(preset.offense, preset.defense, preset.expansion, preset.maritime);
+        let preset = if is_human {
+            NATION_PRESETS[0]
+        } else {
+            NATION_PRESETS[i % NATION_PRESETS.len()]
+        };
+        let flag_id = if is_human {
+            "flag_sol".to_string()
+        } else {
+            preset.flag_id.to_string()
+        };
+        let doctrine = normalize_doctrine(
+            preset.offense,
+            preset.defense,
+            preset.expansion,
+            preset.maritime,
+        );
 
         factions.push(FactionInfo {
             faction_id,
@@ -421,14 +675,23 @@ pub fn generate_100_factions(land_mask: &[u8], count: usize, match_seed: u64) ->
                 accent_color: preset.accent.to_string(),
                 emblem: preset.emblem.to_string(),
             }),
-            nation_preset_id: if is_human { "custom".to_string() } else { preset.id.to_string() },
-            civilization_id: if is_human { "custom".to_string() } else { preset.id.to_string() },
+            nation_preset_id: if is_human {
+                "custom".to_string()
+            } else {
+                preset.id.to_string()
+            },
+            civilization_id: if is_human {
+                "custom".to_string()
+            } else {
+                preset.id.to_string()
+            },
             homeland_region: preset.homeland.to_string(),
             capital_cell: cap.2 as u32,
             provisional_capital: None,
             population: INITIAL_LIVING_POPULATION,
             population_capacity: BASE_HOMELAND_CAPACITY,
-            population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE + TERRITORY_GROWTH_BASE,
+            population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE
+                + TERRITORY_GROWTH_BASE,
             deployed_population: 0.0,
             total_living_population: INITIAL_LIVING_POPULATION,
             controlled_area_km2: 0.0,
@@ -467,7 +730,10 @@ pub fn resolve_civilization_capital(
     existing_capitals: &[usize],
 ) -> usize {
     let is_valid = |c: usize, existing: &[usize]| -> bool {
-        if c >= land_mask.len() || land_mask[c] != 0 || connected_land_capacity(land_mask, c, 28) < 28 {
+        if c >= land_mask.len()
+            || land_mask[c] != 0
+            || connected_land_capacity(land_mask, c, 28) < 28
+        {
             return false;
         }
         let cx1 = c % WORLD_WIDTH;
@@ -571,7 +837,8 @@ pub fn generate_44_civilization_factions(
             population: INITIAL_LIVING_POPULATION,
             total_living_population: INITIAL_LIVING_POPULATION,
             population_capacity: BASE_HOMELAND_CAPACITY,
-            population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE + TERRITORY_GROWTH_BASE,
+            population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE
+                + TERRITORY_GROWTH_BASE,
             deployed_population: 0.0,
             controlled_area_km2: 0.0,
             effective_controlled_area_km2: 0.0,
@@ -616,7 +883,8 @@ pub fn generate_44_civilization_factions(
         population: INITIAL_LIVING_POPULATION,
         total_living_population: INITIAL_LIVING_POPULATION,
         population_capacity: BASE_HOMELAND_CAPACITY,
-        population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE + TERRITORY_GROWTH_BASE,
+        population_growth_per_second: INITIAL_LIVING_POPULATION * RESERVE_GROWTH_RATE
+            + TERRITORY_GROWTH_BASE,
         deployed_population: 0.0,
         controlled_area_km2: 0.0,
         effective_controlled_area_km2: 0.0,
@@ -650,7 +918,10 @@ mod tests {
         let factions_hun = generate_44_civilization_factions(&mask, Some("hun"), 42);
         assert_eq!(factions_hun.len(), 44);
 
-        let human = factions_hun.iter().find(|f| f.is_human).expect("human present");
+        let human = factions_hun
+            .iter()
+            .find(|f| f.is_human)
+            .expect("human present");
         assert_eq!(human.faction_id, HUMAN_FACTION_ID);
         assert_eq!(human.civilization_id, "hun");
 
@@ -660,8 +931,16 @@ mod tests {
         // Verify zero duplicates
         let mut ids = HashSet::new();
         for f in &factions_hun {
-            assert!(ids.insert(&f.civilization_id), "Duplicate civilization id: {}", f.civilization_id);
-            assert!(mask[f.capital_cell as usize] == 0, "Capital on water: {}", f.civilization_id);
+            assert!(
+                ids.insert(&f.civilization_id),
+                "Duplicate civilization id: {}",
+                f.civilization_id
+            );
+            assert!(
+                mask[f.capital_cell as usize] == 0,
+                "Capital on water: {}",
+                f.civilization_id
+            );
         }
         assert_eq!(ids.len(), 44);
     }

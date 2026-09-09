@@ -56,6 +56,9 @@ export class TerrainLodManager {
     public residentTileCount = 0;
     public residentTextureBytes = 0;
     public cachedTextureCount = 0;
+    public tileLoadCount = 0;
+    public tileCacheHitCount = 0;
+    public tileEvictionCount = 0;
     public visibleTileKeys: string[] = [];
     // `visibleTileKeys` intentionally remains the complete atomic coverage
     // set: all of these tiles must be decoded before a streamed LOD appears.
@@ -627,12 +630,18 @@ export class TerrainLodManager {
     private async loadTileTexture(url: string): Promise<PIXI.Texture> {
         const cached = this.textureCache.get(url);
         if (cached) {
+            this.tileCacheHitCount++;
             cached.lastUsedFrame = this.currentFrame;
             return cached.texture;
         }
 
+        this.tileLoadCount++;
         const texture = await PIXI.Assets.load<PIXI.Texture>(url);
         const source = texture.source as any;
+        // Keep streamed visual geography smooth at the close gameplay zoom.
+        // This is presentation-only filtering; tile data never participates
+        // in authoritative terrain or ownership decisions.
+        if (source?.style) source.style.scaleMode = 'linear';
         const width = Number(source?.width || source?.pixelWidth || 512);
         const height = Number(source?.height || source?.pixelHeight || 512);
         this.textureCache.set(url, {
@@ -662,6 +671,7 @@ export class TerrainLodManager {
         for (const [url] of candidates) {
             if (this.textureCache.size <= this.maxResidentTiles) break;
             this.textureCache.delete(url);
+            this.tileEvictionCount++;
             // Assets owns loaded texture sources; unload through the asset cache
             // instead of destroying the source directly (which triggers a Pixi
             // warning and leaves the loader cache inconsistent).

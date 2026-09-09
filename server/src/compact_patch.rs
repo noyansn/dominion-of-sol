@@ -150,11 +150,11 @@ fn score_candidate_v2(
     let ty = (target / WORLD_WIDTH) as i32;
     let x = (idx % WORLD_WIDTH) as i32;
     let y = (idx / WORLD_WIDTH) as i32;
-    
+
     // Direction alignment: distance to target (we want to expand outwards from seed, or towards target)
     // Actually, seed is target. Target distance:
     let target_dist = (x - tx).abs() + (y - ty).abs();
-    
+
     let friendly_cardinal = cardinal(idx)
         .iter()
         .flatten()
@@ -164,13 +164,13 @@ fn score_candidate_v2(
         .iter()
         .filter(|&&n| cells[n].owner_id == owner || patch.contains(&n))
         .count() as i32;
-    
+
     // EXACT Local Perimeter Delta
     // If we add this cell, perimeter changes by +4 - 2*friendly_cardinal
     let new_perimeter = patch_perimeter + 4 - 2 * friendly_cardinal;
     let new_area = patch_area + 1;
     let perimeter_ratio = new_perimeter as f64 / new_area as f64;
-    
+
     // Radial Distance from Centroid
     let dx = x as f64 - patch_centroid_x;
     let dy = y as f64 - patch_centroid_y;
@@ -187,26 +187,23 @@ fn score_candidate_v2(
     } else {
         0
     };
-    
+
     let corridor_penalty = if friendly_cardinal <= 1 && friendly_diagonal == 0 {
         250
     } else {
         0
     };
-    
+
     let hole_penalty = if perimeter_ratio > 3.0 && new_area > 4 {
         ((perimeter_ratio - 3.0) * 100.0) as i32
     } else {
         0
     };
-    
+
     // Base score: 10000 to keep it positive
     // Rewards: friendly neighbors (compactness), low perimeter ratio
     // Penalties: distance to target, distance from centroid, tips, corridors, holes
-    10000 
-        - (target_dist * 10)
-        + (friendly_cardinal * 200)
-        + (friendly_diagonal * 40)
+    10000 - (target_dist * 10) + (friendly_cardinal * 200) + (friendly_diagonal * 40)
         - ((perimeter_ratio * 300.0) as i32)
         - radial_penalty
         - single_cell_tip_penalty
@@ -221,7 +218,9 @@ pub fn generate_compact_patch(
     requested_size: usize,
     mode: PatchMode,
 ) -> PatchResult {
-    let patch_seed = (owner as u64).wrapping_mul(0x85EBCA6B).wrapping_add(target as u64);
+    let patch_seed = (owner as u64)
+        .wrapping_mul(0x85EBCA6B)
+        .wrapping_add(target as u64);
     generate_compact_patch_with_seed(cells, owner, target, requested_size, mode, patch_seed)
 }
 
@@ -287,18 +286,20 @@ pub fn generate_compact_patch_with_seed(
         // Keep every paid/captured patch topologically open. A candidate that
         // would seal a neutral land pocket is rejected; the pocket remains a
         // legal future frontier instead of becoming an enclosed hole.
-        if matches!(mode, PatchMode::NeutralExpansion | PatchMode::WarAdvance { .. })
-            && creates_neutral_hole(cells, owner, &chosen, idx)
+        if matches!(
+            mode,
+            PatchMode::NeutralExpansion | PatchMode::WarAdvance { .. }
+        ) && creates_neutral_hole(cells, owner, &chosen, idx)
         {
             continue;
         }
-        
+
         let cx = (idx % WORLD_WIDTH) as f64;
         let cy = (idx / WORLD_WIDTH) as f64;
         patch_centroid_x = (patch_centroid_x * patch_area as f64 + cx) / (patch_area + 1) as f64;
         patch_centroid_y = (patch_centroid_y * patch_area as f64 + cy) / (patch_area + 1) as f64;
         patch_area += 1;
-        
+
         let friendly_cardinal = cardinal(idx)
             .iter()
             .flatten()
@@ -310,7 +311,17 @@ pub fn generate_compact_patch_with_seed(
         for n in cardinal(idx).into_iter().flatten() {
             if valid(cells, n, mode) && !chosen.contains(&n) && queued.insert(n) {
                 let score = if ENABLE_COMPACT_PATCH_V2 {
-                    score_candidate_v2(cells, owner, target, n, &chosen, patch_area, patch_perimeter, patch_centroid_x, patch_centroid_y)
+                    score_candidate_v2(
+                        cells,
+                        owner,
+                        target,
+                        n,
+                        &chosen,
+                        patch_area,
+                        patch_perimeter,
+                        patch_centroid_x,
+                        patch_centroid_y,
+                    )
                 } else {
                     score_candidate_v1(cells, owner, target, n, &chosen)
                 };
@@ -326,7 +337,17 @@ pub fn generate_compact_patch_with_seed(
         for c in pending {
             let i = c.index as usize;
             let score = if ENABLE_COMPACT_PATCH_V2 {
-                score_candidate_v2(cells, owner, target, i, &chosen, patch_area, patch_perimeter, patch_centroid_x, patch_centroid_y)
+                score_candidate_v2(
+                    cells,
+                    owner,
+                    target,
+                    i,
+                    &chosen,
+                    patch_area,
+                    patch_perimeter,
+                    patch_centroid_x,
+                    patch_centroid_y,
+                )
             } else {
                 score_candidate_v1(cells, owner, target, i, &chosen)
             };

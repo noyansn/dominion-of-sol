@@ -237,6 +237,8 @@ export class DominionRenderer {
             await this.ownershipPresentation.init(
                 this.surface,
                 this.politicalColorTexture,
+                this.politicalOwnerIdTexture,
+                this.politicalPaletteTexture,
             );
             this.isPresentationInitialized = true;
         } catch (e: any) {
@@ -247,13 +249,23 @@ export class DominionRenderer {
         this.isTransitionInitialized = false;
 
         if (ENABLE_POLITICAL_TRANSITIONS) {
-            this.ownershipTransition.init(this.politicalPaletteTexture);
+            this.ownershipTransition.init(this.politicalPaletteTexture, {
+                getAuthoritativeOwnershipRevision: () => gameState.ownershipRevision,
+                getOwnerBufferRevision: () => this.surface.surfaceRevision,
+                getSurfaceMaskRevision: () => this.surface.surfaceRevision,
+                getBasePoliticalTextureRevision: () => this.politicalColorTexture.sourceRevision,
+            });
             this.ownershipTransition.onTransitionComplete = (cells: number[]) => {
                 for (const c of cells) {
                     this.pendingPoliticalCells.add(c);
                 }
             };
             this.politicalFillContainer.addChild(this.ownershipTransition.container);
+            // Keep the already-authorized wipe above the full political fill;
+            // this is presentation ordering only and does not alter ownership.
+            this.politicalFillContainer.sortableChildren = true;
+            this.ownershipTransition.container.zIndex = 100;
+            this.politicalFillContainer.sortChildren();
             this.isTransitionInitialized = true;
         }
 
@@ -348,12 +360,15 @@ export class DominionRenderer {
                 this.politicalPaletteTexture.update(gameState.factions);
                 this.political.markDirty();
             } else if (event === 'CELL_DELTAS') {
-                let handledCells: Set<number> | null = null;
-                if (ENABLE_POLITICAL_TRANSITIONS && gameState.dirtyCells.length > 0) {
-                    handledCells = this.ownershipTransition.handleDeltas(gameState.ownershipChanges, gameState.sequence);
-                }
+                const transitionCells = ENABLE_POLITICAL_TRANSITIONS && gameState.dirtyCells.length > 0
+                    ? this.ownershipTransition.handleDeltas(gameState.ownershipChanges, gameState.ownershipRevision)
+                    : new Set<number>();
                 for (const delta of gameState.dirtyCells) {
-                    if (!handledCells || !handledCells.has(delta.index)) {
+                    // Keep the visual surface on its last authoritative
+                    // presentation until the already-authorized transition
+                    // has wiped through the cell. GameState remains current;
+                    // this only defers the presentation texture update.
+                    if (!transitionCells.has(delta.index)) {
                         this.pendingPoliticalCells.add(delta.index);
                     }
                 }
@@ -540,9 +555,16 @@ export class DominionRenderer {
             return;
         }
 
-        if (context.action === 'EXPAND_FRONTIER' && context.targetCell !== null) {
+        if (context.action === 'NEUTRAL_EXPANSION' && context.targetCell !== null) {
             const ok = gameClient.sendExpand(context.targetCell, gameState.operationMode, gameState.populationCommitPercent / 100);
-            if (ok) (window as any).__DOMINION_COMMAND_UI__?.showToast(`Expanding frontier (${gameState.operationMode})`, 'good');
+            if (ok) (window as any).__DOMINION_COMMAND_UI__?.showToast(`Neutral expansion ordered · ${gameState.operationMode}`, 'good');
+        } else if (context.action === 'AMPHIBIOUS_COLONIZATION' && context.sourceCell !== null && context.targetCell !== null) {
+            const ok = gameClient.sendAmphibiousAttack(
+                context.sourceCell,
+                context.targetCell,
+                gameState.populationCommitPercent / 100,
+            );
+            if (ok) (window as any).__DOMINION_COMMAND_UI__?.showToast('Overseas landing authorized from completed port', 'good');
         } else if (context.action === 'LAUNCH_OFFENSIVE' && context.sourceCell !== null && context.targetCell !== null) {
             const intent = context.clickedCell ?? context.targetCell;
             const ok = gameClient.sendAttack(context.sourceCell, context.targetCell, gameState.populationCommitPercent / 100, intent);
@@ -737,6 +759,13 @@ export class DominionRenderer {
             if (ENABLE_POLITICAL_TRANSITIONS) {
                 measureFrameSystem('ownershipTransitions', () => this.ownershipTransition.update(ticker.deltaMS / 1000.0));
             }
+            // The transition field is the only political contour shown while
+            // an authorized reveal is active. Keeping the old categorical
+            // border pass underneath exposes square tile seams and makes the
+            // animated territory appear larger than the settled silhouette.
+            const transitionActiveAfterUpdate = ENABLE_POLITICAL_TRANSITIONS
+                && this.ownershipTransition.metrics.activeTransitionCount > 0;
+            this.political.container.visible = !transitionActiveAfterUpdate;
         }
         measureFrameSystem('terrain', () => this.geography.tick(ticker.deltaMS / 1000.0));
         this.globe.renderTick();
@@ -760,7 +789,15 @@ export class DominionRenderer {
     if (!this.pendingPoliticalCells.size) return;
     const cells = Array.from(this.pendingPoliticalCells);
     this.pendingPoliticalCells.clear();
-    this.surface.syncDirtyCells(cells);
+    // GameState is authoritative immediately, but the surface cache is the
+    // presentation base. Active transition cells stay on their old visual
+    // owner even when a neighbouring dirty-rect expands across them.
+    const blocked = ENABLE_POLITICAL_TRANSITIONS
+      ? new Set(cells.filter(cell => this.ownershipTransition.isCellActive(cell)))
+      : new Set<number>();
+    this.surface.syncDirtyCells(cells, blocked);
+    const committedCells = cells.filter(cell => !blocked.has(cell));
+    if (committedCells.length === 0) return;
     recordPoliticalDirtyPixels(this.surface.field.metrics.pixelsProcessed);
     this.political.markDirty(this.surface.lastDirtyRects);
     for (const rect of this.surface.lastDirtyRects) {
@@ -828,14 +865,21 @@ export class DominionRenderer {
       const colorRev = this.politicalColorTexture.sourceRevision;
       const ownerRev = this.politicalOwnerIdTexture.sourceRevision;
 
+      const transitionActive = ENABLE_POLITICAL_TRANSITIONS && this.ownershipTransition.metrics.activeTransitionCount > 0;
+      // During an active presentation transition the owner/color textures are
+      // intentionally one revision behind for the authorized dirty cells.
+      // That lag is the base/presentation invariant, not a renderer failure.
+      // Keep the continuous transition overlay visible while the deferred base
+      // region catches up; otherwise it remains hidden until a later unrelated
+      // delta makes the revisions equal, producing an old->nearly-final pop.
+      const presentationRevisionHealthy = ownerRev === surfaceRev || transitionActive;
       const presentationHealthy =
           this.activeMode === 'A1' &&
           isPresentationInitialized &&
           !this.a1InitFailed &&
           surfaceRev > 0 &&
-          ownerRev === surfaceRev;
-
-      if (!this.politicalColorTexture.hasData || colorRev !== surfaceRev) {
+          presentationRevisionHealthy;
+      if (!this.politicalColorTexture.hasData || (!transitionActive && colorRev !== surfaceRev)) {
           this.politicalColorTexture.update(
               this.surface.ownerBuffer,
               gameState.factions,
@@ -1023,6 +1067,7 @@ export class DominionRenderer {
   private introTimer: number | null = null;
 
   public cancelCameraMotion(): void {
+    this.inputController.cancelZoomMotion();
     if (this.cameraPanAnimationId !== null) {
       cancelAnimationFrame(this.cameraPanAnimationId);
       this.cameraPanAnimationId = null;

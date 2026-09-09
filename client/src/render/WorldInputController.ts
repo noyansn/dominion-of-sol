@@ -1,5 +1,11 @@
 import * as PIXI from 'pixi.js';
 
+export const FLAT_ZOOM_MIN = 0.25;
+// The previous cap was 15x world scale. 30x is a measured close-inspection
+// range: the visual tile pyramid can still cover the viewport without asking
+// the authoritative grid or a global texture to increase in resolution.
+export const FLAT_ZOOM_MAX = 30.0;
+
 export interface WheelTelemetry {
   wheelHandlerCalls: number;
   zoomApplications: number;
@@ -36,8 +42,8 @@ export const wheelTelemetry: WheelTelemetry = {
   appliedScale: 1.0,
   appliedSameCall: 1.0,
   nextFrameScale: 1.0,
-  clampMin: 0.25,
-  clampMax: 15.0,
+  clampMin: FLAT_ZOOM_MIN,
+  clampMax: FLAT_ZOOM_MAX,
   isClamped: false,
   ignoredForUiScroll: false,
 };
@@ -107,6 +113,11 @@ export class WorldInputController {
   private onPointerCancelHandler?: (e: PointerEvent) => void;
   private onContextMenuHandler?: (e: MouseEvent) => void;
   private onWheelHandler?: (e: WheelEvent) => void;
+  private zoomTargetScale: number | null = null;
+  private zoomTargetX = 0;
+  private zoomTargetY = 0;
+  private zoomAnimationId: number | null = null;
+  private zoomLastFrameAt = 0;
 
   constructor(private container: PIXI.Container, private canvas: HTMLCanvasElement) {}
 
@@ -376,29 +387,78 @@ export class WorldInputController {
   }
 
 
+  public cancelZoomMotion(): void {
+    if (this.zoomAnimationId !== null) {
+      cancelAnimationFrame(this.zoomAnimationId);
+      this.zoomAnimationId = null;
+    }
+    this.zoomTargetScale = null;
+  }
+
+  private animateZoom = (now: number): void => {
+    if (this.zoomTargetScale === null) {
+      this.zoomAnimationId = null;
+      return;
+    }
+    const dt = Math.max(0, Math.min(80, now - this.zoomLastFrameAt));
+    this.zoomLastFrameAt = now;
+    const blend = 1 - Math.exp(-dt / 72);
+    const scale = this.container.scale.x + (this.zoomTargetScale - this.container.scale.x) * blend;
+    const x = this.container.x + (this.zoomTargetX - this.container.x) * blend;
+    const y = this.container.y + (this.zoomTargetY - this.container.y) * blend;
+    this.container.scale.set(scale);
+    this.container.x = x;
+    this.container.y = y;
+    this.changed();
+
+    const settled = Math.abs(this.zoomTargetScale - scale) < 0.0005
+      && Math.abs(this.zoomTargetX - x) < 0.05
+      && Math.abs(this.zoomTargetY - y) < 0.05;
+    if (settled) {
+      this.container.scale.set(this.zoomTargetScale);
+      this.container.x = this.zoomTargetX;
+      this.container.y = this.zoomTargetY;
+      this.zoomTargetScale = null;
+      this.zoomAnimationId = null;
+      this.changed();
+      return;
+    }
+    this.zoomAnimationId = requestAnimationFrame(this.animateZoom);
+  };
+
+  private startZoomMotion(): void {
+    if (this.zoomAnimationId !== null) return;
+    this.zoomLastFrameAt = performance.now();
+    this.zoomAnimationId = requestAnimationFrame(this.animateZoom);
+  }
+
   public zoomAt(x: number, y: number, factor: number) {
     if (this.globeMode) {
-      this.onGlobeZoom?.(factor);
-      return;
+        this.onGlobeZoom?.(factor);
+        return;
     }
     wheelTelemetry.zoomApplications++;
     const current = this.container.scale.x;
     wheelTelemetry.scaleBefore = current;
 
-    const requested = current * factor;
+    const baseScale = this.zoomTargetScale ?? current;
+    const baseX = this.zoomTargetScale === null ? this.container.x : this.zoomTargetX;
+    const baseY = this.zoomTargetScale === null ? this.container.y : this.zoomTargetY;
+    const requested = baseScale * factor;
     wheelTelemetry.requestedScale = requested;
 
-    const next = Math.max(wheelTelemetry.clampMin, Math.min(wheelTelemetry.clampMax, requested));
+    const next = Math.max(FLAT_ZOOM_MIN, Math.min(FLAT_ZOOM_MAX, requested));
     wheelTelemetry.appliedScale = next;
     wheelTelemetry.isClamped = (next !== requested);
 
-    const actual = next / current;
-    this.container.x = x - (x - this.container.x) * actual;
-    this.container.y = y - (y - this.container.y) * actual;
-    this.container.scale.set(next);
+    const actual = next / baseScale;
+    this.zoomTargetScale = next;
+    this.zoomTargetX = x - (x - baseX) * actual;
+    this.zoomTargetY = y - (y - baseY) * actual;
     wheelTelemetry.appliedSameCall = this.container.scale.x;
     wheelTelemetry.nextFrameScale = this.container.scale.x;
     this.changed();
+    this.startZoomMotion();
   }
 
   private changed() {
@@ -472,6 +532,7 @@ export class WorldInputController {
   }
 
   public reset(): void {
+    this.cancelZoomMotion();
     this.gestureState = 'IDLE';
     this.activePointerId = null;
     this.clearClickCandidate();
@@ -480,4 +541,3 @@ export class WorldInputController {
     this.downTimeMs = 0;
   }
 }
-

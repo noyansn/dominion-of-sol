@@ -4,37 +4,53 @@ mod chokepoints;
 pub mod civilizations;
 mod combat;
 mod compact_patch;
+#[cfg(test)]
+mod economy_tests;
 pub mod expansion;
 mod factions;
 pub mod meta_store;
 mod protocol;
 mod simulation;
-mod world_map;
-pub mod world_topology;
-#[cfg(test)]
-mod economy_tests;
 #[cfg(test)]
 mod topology_fix_tests;
+mod world_map;
+pub mod world_topology;
 
 use bot::BotManager;
+use factions::{normalize_doctrine, valid_flag_descriptor};
 use futures_util::{SinkExt, StreamExt};
 use meta_store::{MetaStore, SharedMetaStore};
 use protocol::{ClientMessage, MatchStateInfo, ServerMessage};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use simulation::{Simulation, AI_FACTION_COUNT, PLAYER_FACTION_ID};
-use factions::{normalize_doctrine, valid_flag_descriptor};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::tungstenite::Message;
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
 use world_map::{TOTAL_CELLS, WORLD_HEIGHT, WORLD_WIDTH};
 
 type Tx = mpsc::Sender<Message>;
 type PeerMap = Arc<RwLock<HashMap<SocketAddr, Tx>>>;
+
+static OWNERSHIP_DELTA_DROPS: AtomicU64 = AtomicU64::new(0);
+static OWNERSHIP_RESYNC_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static MAX_PEER_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+fn owner_grid_hash(sim: &Simulation) -> String {
+    // Stable hash over every authoritative owner byte. The browser-side
+    // acceptance probe uses the same FNV-1a fold over GameState.cellOwners.
+    let mut hash = 0xcbf29ce484222325u64;
+    for cell in &sim.cells {
+        hash ^= cell.owner_id as u64;
+        hash = hash.wrapping_mul(0x100000001b3u64);
+    }
+    format!("{hash:016x}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchPhase {
@@ -63,7 +79,7 @@ pub struct MatchRuntime {
     pub human_session_count: usize,
     pub forced_seed: Option<u64>,
     pub empty_match_grace_timer: u64,
-    
+
     // Counters
     pub gameplay_tick_count: u64,
     pub bot_decision_count: u64,
@@ -78,7 +94,10 @@ fn match_state_info(phase: MatchPhase, active_match: Option<&ActiveMatch>) -> Ma
         MatchPhase::Running => "RUNNING",
         MatchPhase::Finished => "FINISHED",
     };
-    let mut info = MatchStateInfo::new(phase_str, active_match.and_then(|am| am.sim.winner_faction_id));
+    let mut info = MatchStateInfo::new(
+        phase_str,
+        active_match.and_then(|am| am.sim.winner_faction_id),
+    );
     if let Some(am) = active_match {
         info.macro_phase = Some(am.sim.macro_phase.as_str().to_string());
         info.phase_timer = Some(am.sim.macro_phase_timer);
@@ -90,11 +109,12 @@ fn match_state_info(phase: MatchPhase, active_match: Option<&ActiveMatch>) -> Ma
     info
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pid = std::process::id();
-    let binary_path = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let binary_path = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     println!("==================================================");
     println!("SERVER BUILD");
     println!("DOMINION SERVER");
@@ -108,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("==================================================");
 
     let args: Vec<String> = std::env::args().collect();
-    
+
     // Testing mode to demonstrate progression bug/fix
     if args.iter().any(|a| a == "--test-lifecycle") {
         let mut sim = Simulation::new(101);
@@ -149,7 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse::<u64>().ok());
 
     let peers: PeerMap = Arc::new(RwLock::new(HashMap::new()));
-    
+
     let match_runtime = Arc::new(RwLock::new(MatchRuntime {
         phase: MatchPhase::WaitingForPlayer,
         active_match: None,
@@ -162,8 +182,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dev_paused: false,
     }));
 
-    let is_dev_mode = std::env::var("DOMINION_ENV").map(|v| v != "production").unwrap_or(true);
-    let meta_store: SharedMetaStore = Arc::new(std::sync::RwLock::new(MetaStore::new("data/meta_store.json", is_dev_mode)));
+    let is_dev_mode = std::env::var("DOMINION_ENV")
+        .map(|v| v != "production")
+        .unwrap_or(true);
+    let meta_store: SharedMetaStore = Arc::new(std::sync::RwLock::new(MetaStore::new(
+        "data/meta_store.json",
+        is_dev_mode,
+    )));
 
     let addr: SocketAddr = "127.0.0.1:8765".parse().unwrap();
     let listener = TcpListener::bind(addr).await?;
@@ -199,10 +224,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut match_state = MatchStateInfo::new("WAITING", None);
         let mut pending_alliances = vec![];
         let mut has_match_update = false;
-        
+
         {
             let mut rt = match_runtime.write().await;
-            
+
             if rt.phase == MatchPhase::WaitingForPlayer {
                 continue;
             }
@@ -225,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 rt.empty_match_grace_timer = 0;
             }
-            
+
             let mut bot_diff = 0;
             let mut tick_diff = 0;
             let mut ownership_diff = 0;
@@ -281,7 +306,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         anchor_type: Some("MAP".to_string()),
                         cell_index: br.cell_index,
                         front_id: None,
-                        timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
                     };
                     if let Ok(json_text) = serde_json::to_string(&rx_msg) {
                         let ws_msg = Message::Text(json_text);
@@ -296,7 +324,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if match_finished {
                 rt.phase = MatchPhase::Finished;
-                println!("[MATCH] Finished — winner={:?}", rt.active_match.as_ref().and_then(|am| am.sim.winner_faction_id));
+                println!(
+                    "[MATCH] Finished — winner={:?}",
+                    rt.active_match
+                        .as_ref()
+                        .and_then(|am| am.sim.winner_faction_id)
+                );
             }
             match_state = match_state_info(rt.phase, rt.active_match.as_ref());
 
@@ -305,49 +338,117 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rt.ownership_change_count += ownership_diff;
         }
 
-async fn broadcast_to_peers(peers: &PeerMap, msg: Message) {
-    let mut dead_peers = Vec::new();
-    {
-        let peer_guard = peers.read().await;
-        for (&addr, tx) in peer_guard.iter() {
-            if tx.try_send(msg.clone()).is_err() {
-                dead_peers.push(addr);
+        async fn broadcast_to_peers(peers: &PeerMap, msg: Message) {
+            let mut dead_peers = Vec::new();
+            {
+                let peer_guard = peers.read().await;
+                for (&addr, tx) in peer_guard.iter() {
+                    match tx.try_send(msg.clone()) {
+                        Ok(_) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            dead_peers.push(addr);
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            eprintln!(
+                                "[NET WARN] Peer {} queue full! Preserving connection.",
+                                addr
+                            );
+                        }
+                    }
+                }
+            }
+            if !dead_peers.is_empty() {
+                let mut peer_guard = peers.write().await;
+                for dead in dead_peers {
+                    peer_guard.remove(&dead);
+                }
             }
         }
-    }
-    if !dead_peers.is_empty() {
-        let mut peer_guard = peers.write().await;
-        for dead in dead_peers {
-            peer_guard.remove(&dead);
+
+        /// Ownership deltas are authoritative state. The simulation loop stays
+        /// non-blocking, so a full peer queue may drop a batch, but the loss is
+        /// explicitly counted and the client repairs the gap with a reliable snapshot.
+        async fn broadcast_ownership_delta(peers: &PeerMap, msg: Message) {
+            let mut dead_peers = Vec::new();
+            let mut dropped = 0u64;
+            {
+                let peer_guard = peers.read().await;
+                for (&addr, tx) in peer_guard.iter() {
+                    let depth = tx.max_capacity().saturating_sub(tx.capacity());
+                    MAX_PEER_QUEUE_DEPTH.fetch_max(depth, Ordering::Relaxed);
+                    match tx.try_send(msg.clone()) {
+                        Ok(_) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            dead_peers.push(addr)
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            dropped += 1;
+                            eprintln!(
+                                "[NET OWNERSHIP] peer={} delta queue full; client resync required",
+                                addr
+                            );
+                        }
+                    }
+                }
+            }
+            if dropped > 0 {
+                OWNERSHIP_DELTA_DROPS.fetch_add(dropped, Ordering::Relaxed);
+            }
+            if !dead_peers.is_empty() {
+                let mut peer_guard = peers.write().await;
+                for dead in dead_peers {
+                    peer_guard.remove(&dead);
+                }
+            }
         }
-    }
-}
 
         if !has_match_update {
             continue;
         }
-            let delta_msg = ServerMessage::CellDeltaBatch {
-                tick: t,
-                sequence: seq,
-                deltas,
-                fronts,
-                match_state,
-                pending_alliances,
-            };
+        let has_ownership_deltas = !deltas.is_empty();
+        let delta_msg = ServerMessage::CellDeltaBatch {
+            tick: t,
+            sequence: seq,
+            ownership_revision: seq,
+            deltas,
+            fronts,
+            match_state,
+            pending_alliances,
+        };
 
-            if let Ok(json_text) = serde_json::to_string(&delta_msg) {
-                let ws_msg = Message::Text(json_text);
+        if let Ok(json_text) = serde_json::to_string(&delta_msg) {
+            let ws_msg = Message::Text(json_text);
+            if has_ownership_deltas {
+                broadcast_ownership_delta(&peers, ws_msg).await;
+            } else {
+                // Empty heartbeat batches carry presentation state only. They
+                // must not compete with authoritative ownership deltas in the
+                // bounded peer queue.
                 broadcast_to_peers(&peers, ws_msg).await;
             }
+        }
 
         if broadcast_counter % 10 == 0 {
-            let (tick, active_players, active_fronts, factions, ports, alliances, pending_alliances) = {
+            let (
+                tick,
+                active_players,
+                active_fronts,
+                factions,
+                ports,
+                alliances,
+                pending_alliances,
+            ) = {
                 let rt = match_runtime.read().await;
                 if let Some(am) = &rt.active_match {
                     (
                         am.sim.tick,
                         peers.read().await.len(),
-                        am.sim.combat_manager.fronts.iter().filter(|front| front.is_combat_active).count(),
+                        am.sim
+                            .combat_manager
+                            .fronts
+                            .iter()
+                            .filter(|front| front.is_combat_active)
+                            .count(),
                         am.sim.factions.clone(),
                         am.sim.port_states(),
                         am.sim.alliance_states(),
@@ -362,7 +463,10 @@ async fn broadcast_to_peers(peers: &PeerMap, msg: Message) {
                 tick,
                 tick_time_ms,
                 active_players,
-                bot_count: factions.iter().filter(|f| !f.is_human && !f.is_eliminated).count(),
+                bot_count: factions
+                    .iter()
+                    .filter(|f| !f.is_human && !f.is_eliminated)
+                    .count(),
                 deltas_count: 0,
                 active_fronts,
                 ram_usage_mb: 24.5,
@@ -372,8 +476,12 @@ async fn broadcast_to_peers(peers: &PeerMap, msg: Message) {
                 let ws_msg = Message::Text(json_text);
                 broadcast_to_peers(&peers, ws_msg).await;
             }
-            if let Ok(json_text) = serde_json::to_string(&ServerMessage::FactionUpdate { factions, ports, alliances, pending_alliances })
-            {
+            if let Ok(json_text) = serde_json::to_string(&ServerMessage::FactionUpdate {
+                factions,
+                ports,
+                alliances,
+                pending_alliances,
+            }) {
                 let ws_msg = Message::Text(json_text);
                 broadcast_to_peers(&peers, ws_msg).await;
             }
@@ -399,7 +507,7 @@ async fn handle_connection(
     println!("[NET] WebSocket handshake established: {}", addr);
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
-    let (tx, mut rx) = mpsc::channel(256);
+    let (tx, mut rx) = mpsc::channel(4096);
 
     peers.write().await.insert(addr, tx.clone());
 
@@ -447,13 +555,34 @@ async fn handle_connection(
                 if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
                     match msg {
                         ClientMessage::DevDiagnostic => {
-                            let (diag_m_id, diag_tick, diag_phase, diag_alive) = {
+                            let (
+                                diag_m_id,
+                                diag_tick,
+                                diag_phase,
+                                diag_alive,
+                                diag_owner_grid_hash,
+                            ) = {
                                 let rt = match_runtime.read().await;
                                 (
                                     rt.active_match.as_ref().map(|m| m.match_id.clone()),
                                     rt.active_match.as_ref().map(|m| m.sim.tick).unwrap_or(0),
                                     format!("{:?}", rt.phase),
-                                    rt.active_match.as_ref().map(|m| m.sim.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count()).unwrap_or(0),
+                                    rt.active_match
+                                        .as_ref()
+                                        .map(|m| {
+                                            m.sim
+                                                .factions
+                                                .iter()
+                                                .filter(|f| {
+                                                    !f.is_eliminated && f.territory_count > 0
+                                                })
+                                                .count()
+                                        })
+                                        .unwrap_or(0),
+                                    rt.active_match
+                                        .as_ref()
+                                        .map(|m| owner_grid_hash(&m.sim))
+                                        .unwrap_or_else(|| "none".to_string()),
                                 )
                             };
                             let diag = ServerMessage::DevDiagnostic {
@@ -465,6 +594,7 @@ async fn handle_connection(
                                 current_tick: diag_tick,
                                 phase: diag_phase,
                                 alive_factions: diag_alive,
+                                owner_grid_hash: diag_owner_grid_hash,
                             };
                             if let Ok(json) = serde_json::to_string(&diag) {
                                 let _ = tx.try_send(Message::Text(json));
@@ -491,13 +621,23 @@ async fn handle_connection(
                             let mut snapshot_to_send = None;
                             {
                                 let mut rt = match_runtime.write().await;
-                                
+
                                 let phase_before = format!("{:?}", rt.phase);
-                                let match_id_before = rt.active_match.as_ref().map(|am| am.match_id.clone()).unwrap_or_else(|| "NONE".to_string());
+                                let match_id_before = rt
+                                    .active_match
+                                    .as_ref()
+                                    .map(|am| am.match_id.clone())
+                                    .unwrap_or_else(|| "NONE".to_string());
                                 let human_count_before = rt.human_session_count;
 
                                 println!("[PLAYER_JOIN]");
-                                println!("timestamp={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                                println!(
+                                    "timestamp={}",
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs()
+                                );
                                 println!("remote={}", addr);
                                 println!("playerName={}", player_name);
                                 println!("civId={:?}", civilization_id);
@@ -508,22 +648,45 @@ async fn handle_connection(
                                 println!("requestedMatchId={:?}", match_id);
 
                                 let is_player_dead = rt.active_match.as_ref().map_or(false, |am| {
-                                    am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(true, |f| f.is_eliminated || f.territory_count == 0)
+                                    am.sim
+                                        .factions
+                                        .iter()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                        .map_or(true, |f| f.is_eliminated || f.territory_count == 0)
                                 });
 
-                                let is_explicit_new_match = lifecycle_action.as_deref() == Some("NEW_MATCH");
-                                let is_different_match_requested = match_id.is_some() && rt.active_match.as_ref().map_or(false, |am| match_id.as_deref() != Some(am.match_id.as_str()));
+                                let is_explicit_new_match =
+                                    lifecycle_action.as_deref() == Some("NEW_MATCH");
+                                let is_different_match_requested = match_id.is_some()
+                                    && rt.active_match.as_ref().map_or(false, |am| {
+                                        match_id.as_deref() != Some(am.match_id.as_str())
+                                    });
 
-                                if rt.phase == MatchPhase::WaitingForPlayer || rt.phase == MatchPhase::Finished || is_player_dead || is_explicit_new_match || is_different_match_requested || rt.active_match.is_none() {
-                                    let seed = if let Some(s) = rt.forced_seed { s } else { rand::thread_rng().gen() };
-                                    let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                                if rt.phase == MatchPhase::WaitingForPlayer
+                                    || rt.phase == MatchPhase::Finished
+                                    || is_player_dead
+                                    || is_explicit_new_match
+                                    || is_different_match_requested
+                                    || rt.active_match.is_none()
+                                {
+                                    let seed = if let Some(s) = rt.forced_seed {
+                                        s
+                                    } else {
+                                        rand::thread_rng().gen()
+                                    };
+                                    let now_secs = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
                                     let fresh_match_id = match_id.clone().unwrap_or_else(|| {
                                         format!("dominion_{}_{}", now_secs, seed % 10000)
                                     });
 
-                                    let new_sim = Simulation::new_standard(civilization_id.as_deref(), seed);
-                                    let new_bot_manager = BotManager::with_seed(43, seed.wrapping_add(1));
-                                    
+                                    let new_sim =
+                                        Simulation::new_standard(civilization_id.as_deref(), seed);
+                                    let new_bot_manager =
+                                        BotManager::with_seed(43, seed.wrapping_add(1));
+
                                     let mut total_owned = 0;
                                     let mut unique_owners = 0;
                                     let mut faction_counts = vec![0; 256];
@@ -538,14 +701,14 @@ async fn handle_connection(
                                             }
                                         }
                                     }
-                                    
+
                                     println!("[FRESH_MATCH_CREATED]");
                                     println!("matchId={}", fresh_match_id);
                                     println!("seed={}", seed);
                                     println!("tick=0");
                                     println!("totalOwned={}", total_owned);
                                     println!("uniqueOwners={}", unique_owners);
-                                    
+
                                     println!("=== TICK 0 AUDIT SNAPSHOT: 44 CIVILIZATIONS ===");
                                     println!("tick\tfaction_id\tciv_id\tterritory_count\tland_area_km2\tpopulation\tcapital_cell");
                                     for f in &new_sim.factions {
@@ -567,8 +730,10 @@ async fn handle_connection(
                                     }
 
                                     println!("[MATCH_PRE_MATCH]");
-                                    println!("reason=first_human_join_frozen_awaiting_player_ready");
-                                    
+                                    println!(
+                                        "reason=first_human_join_frozen_awaiting_player_ready"
+                                    );
+
                                     rt.active_match = Some(ActiveMatch {
                                         match_id: fresh_match_id,
                                         creation_timestamp: now_secs,
@@ -583,25 +748,34 @@ async fn handle_connection(
                                         println!("[MATCH_PAUSED] dev_paused=true on player join");
                                     }
                                 }
-                                
+
                                 if !has_joined {
                                     has_joined = true;
                                     rt.human_session_count += 1;
                                 }
-                                
+
                                 let phase = rt.phase;
                                 if let Some(am) = rt.active_match.as_mut() {
-                                    let (cells_before, area_before) = am.sim.factions
+                                    let (cells_before, area_before) = am
+                                        .sim
+                                        .factions
                                         .iter()
                                         .find(|f| f.faction_id == PLAYER_FACTION_ID)
                                         .map(|f| (f.territory_count, f.controlled_area_km2))
                                         .unwrap_or((0, 0.0));
 
-                                    println!("[FACTION_101_BEFORE_JOIN] cells={} area={:.2}", cells_before, area_before);
+                                    println!(
+                                        "[FACTION_101_BEFORE_JOIN] cells={} area={:.2}",
+                                        cells_before, area_before
+                                    );
 
                                     if civilization_id.as_deref() == Some("custom") {
                                         if let Some(start) = starting_cell_index {
-                                            if am.sim.relocate_faction_start(PLAYER_FACTION_ID, start).is_err() {
+                                            if am
+                                                .sim
+                                                .relocate_faction_start(PLAYER_FACTION_ID, start)
+                                                .is_err()
+                                            {
                                                 eprintln!("[PLAYER_JOIN] requested starting cell rejected: {}", start);
                                             }
                                         }
@@ -609,28 +783,68 @@ async fn handle_connection(
                                         println!("[PLAYER_JOIN] preserved canonical capital/nucleus; ignored starting_cell_index for preset ({:?})", civilization_id);
                                     }
 
-                                    let (cells_after, area_after) = am.sim.factions
+                                    let (cells_after, area_after) = am
+                                        .sim
+                                        .factions
                                         .iter()
                                         .find(|f| f.faction_id == PLAYER_FACTION_ID)
                                         .map(|f| (f.territory_count, f.controlled_area_km2))
                                         .unwrap_or((0, 0.0));
 
-                                    println!("[FACTION_101_AFTER_JOIN] cells={} area={:.2}", cells_after, area_after);
+                                    println!(
+                                        "[FACTION_101_AFTER_JOIN] cells={} area={:.2}",
+                                        cells_after, area_after
+                                    );
                                     if civilization_id.as_deref() != Some("custom") {
-                                        assert_eq!(cells_before, cells_after, "FATAL: Joining as human mutated territory cells!");
+                                        assert_eq!(
+                                            cells_before, cells_after,
+                                            "FATAL: Joining as human mutated territory cells!"
+                                        );
                                     }
-                                    if let Some(player) = am.sim.factions.iter_mut().find(|f| f.faction_id == PLAYER_FACTION_ID) {
-                                        if let Some(name) = nation_name.as_deref().map(str::trim).filter(|name| (2..=32).contains(&name.len())) {
-                                            player.display_name = name.chars().filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '-' || *c == '_').collect();
+                                    if let Some(player) = am
+                                        .sim
+                                        .factions
+                                        .iter_mut()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                    {
+                                        if let Some(name) = nation_name
+                                            .as_deref()
+                                            .map(str::trim)
+                                            .filter(|name| (2..=32).contains(&name.len()))
+                                        {
+                                            player.display_name = name
+                                                .chars()
+                                                .filter(|c| {
+                                                    c.is_alphanumeric()
+                                                        || c.is_whitespace()
+                                                        || *c == '-'
+                                                        || *c == '_'
+                                                })
+                                                .collect();
                                         }
-                                        if let Some(color) = faction_color.as_deref().filter(|color| color.len() == 7 && color.starts_with('#') && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())) {
+                                        if let Some(color) =
+                                            faction_color.as_deref().filter(|color| {
+                                                color.len() == 7
+                                                    && color.starts_with('#')
+                                                    && color
+                                                        .chars()
+                                                        .skip(1)
+                                                        .all(|c| c.is_ascii_hexdigit())
+                                            })
+                                        {
                                             player.faction_color = color.to_string();
-                                            player.color_int = u32::from_str_radix(&color[1..], 16).unwrap_or(player.color_int);
+                                            player.color_int = u32::from_str_radix(&color[1..], 16)
+                                                .unwrap_or(player.color_int);
                                         }
-                                        if let Some(flag) = flag_id.as_deref().filter(|id| id.starts_with("flag_") && id.len() <= 32) {
+                                        if let Some(flag) = flag_id
+                                            .as_deref()
+                                            .filter(|id| id.starts_with("flag_") && id.len() <= 32)
+                                        {
                                             player.flag_id = flag.to_string();
                                         }
-                                        if let Some(descriptor) = flag_descriptor.filter(valid_flag_descriptor) {
+                                        if let Some(descriptor) =
+                                            flag_descriptor.filter(valid_flag_descriptor)
+                                        {
                                             player.flag_descriptor = Some(descriptor);
                                             player.flag_id = "flag_custom".to_string();
                                             player.nation_preset_id = "custom".to_string();
@@ -646,13 +860,15 @@ async fn handle_connection(
                                         player.doctrine_expansion = doctrine[2];
                                         player.doctrine_maritime = doctrine[3];
                                         if player.nation_preset_id == "custom" {
-                                            player.display_name = player.display_name.trim().to_string();
+                                            player.display_name =
+                                                player.display_name.trim().to_string();
                                         }
                                     }
                                     let state = match_state_info(phase, Some(am));
                                     snapshot_to_send = Some(ServerMessage::WorldSnapshot {
                                         tick: am.sim.tick,
                                         sequence: am.sim.sequence,
+                                        ownership_revision: am.sim.sequence,
                                         width: WORLD_WIDTH as u16,
                                         height: WORLD_HEIGHT as u16,
                                         total_cells: TOTAL_CELLS as u32,
@@ -668,14 +884,17 @@ async fn handle_connection(
                                     });
                                 }
                             }
-                            
+
                             if let Some(snapshot) = snapshot_to_send {
                                 let snap_json = serde_json::to_string(&snapshot).unwrap();
                                 let _ = tx.try_send(Message::Text(snap_json.into()));
                             }
 
                             if protocol_version != crate::protocol::PROTOCOL_VERSION {
-                                eprintln!("[NET] Connection rejected: incompatible protocol version '{}'", protocol_version);
+                                eprintln!(
+                                    "[NET] Connection rejected: incompatible protocol version '{}'",
+                                    protocol_version
+                                );
                                 let _ = tx.try_send(Message::Close(None));
                                 continue;
                             }
@@ -685,12 +904,38 @@ async fn handle_connection(
                             {
                                 let rt = match_runtime.read().await;
                                 if let Some(am) = rt.active_match.as_ref() {
-                                    let is_human_dead = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(true, |f| f.is_eliminated || f.territory_count == 0);
-                                    let human_cells = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(0, |f| f.territory_count);
-                                    let human_pop = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID).map_or(0.0, |f| f.population);
-                                    let active_nations = am.sim.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
+                                    let is_human_dead = am
+                                        .sim
+                                        .factions
+                                        .iter()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                        .map_or(true, |f| {
+                                            f.is_eliminated || f.territory_count == 0
+                                        });
+                                    let human_cells = am
+                                        .sim
+                                        .factions
+                                        .iter()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                        .map_or(0, |f| f.territory_count);
+                                    let human_pop = am
+                                        .sim
+                                        .factions
+                                        .iter()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                        .map_or(0.0, |f| f.population);
+                                    let active_nations = am
+                                        .sim
+                                        .factions
+                                        .iter()
+                                        .filter(|f| !f.is_eliminated && f.territory_count > 0)
+                                        .count();
                                     let is_running = rt.phase == MatchPhase::Running;
-                                    let entry_mode = if am.sim.tick == 0 { "NEW_MATCH" } else { "RESUME_MATCH" };
+                                    let entry_mode = if am.sim.tick == 0 {
+                                        "NEW_MATCH"
+                                    } else {
+                                        "RESUME_MATCH"
+                                    };
 
                                     println!("==================================================");
                                     println!("ENTRY MODE = {}", entry_mode);
@@ -700,17 +945,39 @@ async fn handle_connection(
                                     println!("PLAYER READY = {}", is_running);
                                     println!("SIMULATION RUNNING = {}", is_running);
                                     println!("NATION COUNT = {}", active_nations);
-                                    println!("HUMAN FACTION STATUS = {}", if is_human_dead { "DEFEATED" } else { "ALIVE" });
+                                    println!(
+                                        "HUMAN FACTION STATUS = {}",
+                                        if is_human_dead { "DEFEATED" } else { "ALIVE" }
+                                    );
                                     println!("HUMAN LAND CELLS = {}", human_cells);
                                     println!("HUMAN POPULATION = {:.0}", human_pop);
-                                    println!("AI ORDERS BEFORE READY = {}", if am.sim.tick == 0 { 0 } else { am.bot_manager.attempts });
-                                    println!("OWNERSHIP MUTATIONS BEFORE READY = {}", if am.sim.tick == 0 { 0 } else { am.sim.sequence });
-                                    println!("ELIMINATIONS BEFORE READY = {}", 44usize.saturating_sub(active_nations));
+                                    println!(
+                                        "AI ORDERS BEFORE READY = {}",
+                                        if am.sim.tick == 0 {
+                                            0
+                                        } else {
+                                            am.bot_manager.attempts
+                                        }
+                                    );
+                                    println!(
+                                        "OWNERSHIP MUTATIONS BEFORE READY = {}",
+                                        if am.sim.tick == 0 { 0 } else { am.sim.sequence }
+                                    );
+                                    println!(
+                                        "ELIMINATIONS BEFORE READY = {}",
+                                        44usize.saturating_sub(active_nations)
+                                    );
                                     println!("==================================================");
 
                                     if entry_mode == "NEW_MATCH" {
-                                        assert_eq!(am.sim.tick, 0, "Assertion failed: New match tick > 0 before ready");
-                                        assert_eq!(active_nations, 44, "Assertion failed: New match nations < 44 before ready");
+                                        assert_eq!(
+                                            am.sim.tick, 0,
+                                            "Assertion failed: New match tick > 0 before ready"
+                                        );
+                                        assert_eq!(
+                                            active_nations, 44,
+                                            "Assertion failed: New match nations < 44 before ready"
+                                        );
                                         assert!(!is_human_dead, "Assertion failed: Human player eliminated at tick 0 before ready");
                                     }
                                 }
@@ -729,8 +996,14 @@ async fn handle_connection(
                                         | "flag_obsidian"
                                 )
                             }) {
-                                if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                    if let Some(player) = am.sim.factions.iter_mut().find(|f| f.faction_id == PLAYER_FACTION_ID) {
+                                if let Some(am) = match_runtime.write().await.active_match.as_mut()
+                                {
+                                    if let Some(player) = am
+                                        .sim
+                                        .factions
+                                        .iter_mut()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                    {
                                         player.flag_id = flag;
                                     }
                                 }
@@ -739,12 +1012,20 @@ async fn handle_connection(
                         ClientMessage::PlayerReady { match_id: r_mid } => {
                             let mut rt = match_runtime.write().await;
                             if rt.phase == MatchPhase::PreMatch {
-                                let m_id = rt.active_match.as_ref().map(|am| am.match_id.clone()).unwrap_or_default();
+                                let m_id = rt
+                                    .active_match
+                                    .as_ref()
+                                    .map(|am| am.match_id.clone())
+                                    .unwrap_or_default();
                                 println!("[LIFECYCLE] Player ready received for match {:?}. Active match is {}. Transitioning PreMatch -> Running at tick 0.", r_mid, m_id);
                                 rt.phase = MatchPhase::Running;
                             }
                         }
-                        ClientMessage::SendReaction { reaction_id, cell_index, front_id } => {
+                        ClientMessage::SendReaction {
+                            reaction_id,
+                            cell_index,
+                            front_id,
+                        } => {
                             let is_usable = {
                                 let ms = meta_store.read().unwrap();
                                 if let Some(ref aid) = current_account_id {
@@ -754,15 +1035,27 @@ async fn handle_connection(
                                 }
                             };
                             if !is_usable {
-                                eprintln!("[REACTION] Rejected unowned or invalid reaction: {}", reaction_id);
+                                eprintln!(
+                                    "[REACTION] Rejected unowned or invalid reaction: {}",
+                                    reaction_id
+                                );
                                 continue;
                             }
 
                             let now = std::time::Instant::now();
-                            if now.duration_since(last_reaction_instant) >= std::time::Duration::from_millis(3500) {
+                            if now.duration_since(last_reaction_instant)
+                                >= std::time::Duration::from_millis(3500)
+                            {
                                 last_reaction_instant = now;
-                                let (pname, ptag) = if let Some(am) = match_runtime.read().await.active_match.as_ref() {
-                                    if let Some(p) = am.sim.factions.iter().find(|f| f.faction_id == PLAYER_FACTION_ID) {
+                                let (pname, ptag) = if let Some(am) =
+                                    match_runtime.read().await.active_match.as_ref()
+                                {
+                                    if let Some(p) = am
+                                        .sim
+                                        .factions
+                                        .iter()
+                                        .find(|f| f.faction_id == PLAYER_FACTION_ID)
+                                    {
                                         (p.display_name.clone(), "#7F42A".to_string())
                                     } else {
                                         ("Commander".to_string(), "#7F42A".to_string())
@@ -781,7 +1074,10 @@ async fn handle_connection(
                                     anchor_type: Some("MAP".to_string()),
                                     cell_index,
                                     front_id,
-                                    timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs(),
                                 };
                                 if let Ok(json) = serde_json::to_string(&broadcast) {
                                     let ws_msg = Message::Text(json.into());
@@ -792,108 +1088,132 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::ReinforceFront { front_id, commit_percent } => {
-                            let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                am.sim.reinforce_front(PLAYER_FACTION_ID, front_id, commit_percent)
-                            } else { Err("no_active_match".to_string()) };
+                        ClientMessage::ReinforceFront {
+                            front_id,
+                            commit_percent,
+                        } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim
+                                    .reinforce_front(PLAYER_FACTION_ID, front_id, commit_percent)
+                            } else {
+                                Err("no_active_match".to_string())
+                            };
                             let response = ServerMessage::ReinforceResult {
                                 accepted: result.is_ok(),
                                 front_id,
                                 deployed_population: result.as_ref().copied().unwrap_or(0.0),
                                 reason: result.err().unwrap_or_else(|| "accepted".to_string()),
                             };
-                            if let Ok(json) = serde_json::to_string(&response) { let _ = tx.try_send(Message::Text(json.into())); }
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(json.into()));
+                            }
                         }
-                            ClientMessage::AttackCommand {
-                                source_cell_index,
-                                target_cell_index,
-                                requested_target_cell_index,
-                                commit_percent,
-                                ..
-                            } => {
-                                let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                    am.sim.process_attack_command_with_intent(
+                        ClientMessage::AttackCommand {
+                            source_cell_index,
+                            target_cell_index,
+                            requested_target_cell_index,
+                            commit_percent,
+                            ..
+                        } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim.process_attack_command_with_intent(
+                                    PLAYER_FACTION_ID,
+                                    source_cell_index,
+                                    target_cell_index,
+                                    requested_target_cell_index,
+                                    commit_percent,
+                                )
+                            } else {
+                                Err("no_active_match".to_string())
+                            };
+                            let response = match result {
+                                Ok(outcome) => ServerMessage::AttackResult {
+                                    accepted: true,
+                                    source_cell_index,
+                                    target_cell_index,
+                                    front_id: Some(outcome.front_id),
+                                    deployed_population: outcome.deployed_population,
+                                    reason: "accepted".to_string(),
+                                },
+                                Err(reason) => ServerMessage::AttackResult {
+                                    accepted: false,
+                                    source_cell_index,
+                                    target_cell_index,
+                                    front_id: None,
+                                    deployed_population: 0.0,
+                                    reason,
+                                },
+                            };
+                            if let Ok(response_json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(response_json.into()));
+                            }
+                        }
+                        ClientMessage::CancelAttack { front_id } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim.cancel_attack(PLAYER_FACTION_ID, front_id)
+                            } else {
+                                Err("no_active_match".to_string())
+                            };
+                            let response = ServerMessage::AttackResult {
+                                accepted: result.is_ok(),
+                                source_cell_index: 0,
+                                target_cell_index: 0,
+                                front_id: Some(front_id),
+                                deployed_population: 0.0,
+                                reason: result.err().unwrap_or_else(|| "cancelled".to_string()),
+                            };
+                            if let Ok(response_json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(response_json.into()));
+                            }
+                        }
+                        ClientMessage::ExpandCommand {
+                            target_cell_index,
+                            mode,
+                            commit_percent,
+                        } => {
+                            let outcome = {
+                                if let Some(am) = match_runtime.write().await.active_match.as_mut()
+                                {
+                                    let m = mode.as_deref().unwrap_or("FOCUS");
+                                    am.sim.process_expand_command_with_mode(
                                         PLAYER_FACTION_ID,
-                                        source_cell_index,
                                         target_cell_index,
-                                        requested_target_cell_index,
+                                        m,
                                         commit_percent,
                                     )
                                 } else {
                                     Err("no_active_match".to_string())
-                                };
-                                let response = match result {
-                                    Ok(outcome) => ServerMessage::AttackResult {
-                                        accepted: true,
-                                        source_cell_index,
-                                        target_cell_index,
-                                        front_id: Some(outcome.front_id),
-                                        deployed_population: outcome.deployed_population,
-                                        reason: "accepted".to_string(),
-                                    },
-                                    Err(reason) => ServerMessage::AttackResult {
-                                        accepted: false,
-                                        source_cell_index,
-                                        target_cell_index,
-                                        front_id: None,
-                                        deployed_population: 0.0,
-                                        reason,
-                                    },
-                                };
-                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                    let _ = tx.try_send(Message::Text(response_json.into()));
                                 }
-                            }
-                            ClientMessage::CancelAttack { front_id } => {
-                                let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                    am.sim.cancel_attack(PLAYER_FACTION_ID, front_id)
-                                } else {
-                                    Err("no_active_match".to_string())
-                                };
-                                let response = ServerMessage::AttackResult {
-                                    accepted: result.is_ok(),
-                                    source_cell_index: 0,
-                                    target_cell_index: 0,
-                                    front_id: Some(front_id),
-                                    deployed_population: 0.0,
-                                    reason: result.err().unwrap_or_else(|| "cancelled".to_string()),
-                                };
-                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                    let _ = tx.try_send(Message::Text(response_json.into()));
-                                }
-                            }
-                        ClientMessage::ExpandCommand { target_cell_index, mode, commit_percent } => {
-                                let outcome = {
-                                    if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                        let m = mode.as_deref().unwrap_or("FOCUS");
-                                        am.sim.process_expand_command_with_mode(PLAYER_FACTION_ID, target_cell_index, m, commit_percent)
-                                    } else {
-                                        Err("no_active_match".to_string())
-                                    }
-                                };
+                            };
 
-                                let res_msg = match &outcome {
-                                    Ok(out) => ServerMessage::ExpandResult {
-                                        accepted: true,
-                                        requested_target: target_cell_index,
-                                        resolved_anchor: Some(out.resolved_anchor),
-                                        actual_size: out.patch.actual_size as u16,
-                                        population_cost: out.population_cost,
-                                        reason: "accepted".to_string(),
-                                    },
-                                    Err(reason) => ServerMessage::ExpandResult {
-                                        accepted: false,
-                                        requested_target: target_cell_index,
-                                        resolved_anchor: None,
-                                        actual_size: 0,
-                                        population_cost: 0.0,
-                                        reason: reason.clone(),
-                                    },
-                                };
+                            let res_msg = match &outcome {
+                                Ok(out) => ServerMessage::ExpandResult {
+                                    accepted: true,
+                                    requested_target: target_cell_index,
+                                    resolved_anchor: Some(out.resolved_anchor),
+                                    actual_size: out.patch.actual_size as u16,
+                                    population_cost: out.population_cost,
+                                    reason: "accepted".to_string(),
+                                },
+                                Err(reason) => ServerMessage::ExpandResult {
+                                    accepted: false,
+                                    requested_target: target_cell_index,
+                                    resolved_anchor: None,
+                                    actual_size: 0,
+                                    population_cost: 0.0,
+                                    reason: reason.clone(),
+                                },
+                            };
 
-                                if let Ok(res_json) = serde_json::to_string(&res_msg) {
-                                    let _ = tx.try_send(Message::Text(res_json.into()));
-                                }
+                            if let Ok(res_json) = serde_json::to_string(&res_msg) {
+                                let _ = tx.try_send(Message::Text(res_json.into()));
+                            }
 
                             if let Ok(out) = outcome {
                                 if let Some((faction_a, faction_b, location)) = out.first_contact {
@@ -912,13 +1232,24 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::DefenseFocus { cell_index, population } => {
-                            let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                am.sim.set_defense_focus(PLAYER_FACTION_ID, cell_index, population)
+                        ClientMessage::DefenseFocus {
+                            cell_index,
+                            population,
+                        } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim
+                                    .set_defense_focus(PLAYER_FACTION_ID, cell_index, population)
                             } else {
                                 Err("no_active_match".to_string())
                             };
-                            println!("[DEFENSE] cell={} population={} accepted={}", cell_index, population, result.is_ok());
+                            println!(
+                                "[DEFENSE] cell={} population={} accepted={}",
+                                cell_index,
+                                population,
+                                result.is_ok()
+                            );
                         }
                         ClientMessage::ReleaseDefenseFocus { cell_index } => {
                             if let Some(am) = match_runtime.write().await.active_match.as_mut() {
@@ -926,9 +1257,13 @@ async fn handle_connection(
                             }
                         }
                         ClientMessage::BuildPort { cell_index } => {
-                            let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
                                 am.sim.build_port(PLAYER_FACTION_ID, cell_index)
-                            } else { Err("no_active_match".to_string()) };
+                            } else {
+                                Err("no_active_match".to_string())
+                            };
                             let response = ServerMessage::PortResult {
                                 accepted: result.is_ok(),
                                 cell_index,
@@ -936,63 +1271,146 @@ async fn handle_connection(
                                 remaining_seconds: if result.is_ok() { 10.0 } else { 0.0 },
                                 reason: result.err().unwrap_or_else(|| "accepted".to_string()),
                             };
-                            if let Ok(json) = serde_json::to_string(&response) { let _ = tx.try_send(Message::Text(json.into())); }
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(json.into()));
+                            }
                         }
-                        ClientMessage::AmphibiousAttack { port_cell_index, target_cell_index, commit_percent } => {
-                            let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                am.sim.process_amphibious_operation(PLAYER_FACTION_ID, port_cell_index, target_cell_index, commit_percent)
-                            } else { Err("no_active_match".to_string()) };
-                            let response = match result {
-                                Ok(out) => ServerMessage::AttackResult { accepted: true, source_cell_index: port_cell_index, target_cell_index, front_id: Some(out.front_id), deployed_population: out.deployed_population, reason: "accepted".to_string() },
-                                Err(reason) => ServerMessage::AttackResult { accepted: false, source_cell_index: port_cell_index, target_cell_index, front_id: None, deployed_population: 0.0, reason },
+                        ClientMessage::AmphibiousAttack {
+                            port_cell_index,
+                            target_cell_index,
+                            commit_percent,
+                        } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim.process_amphibious_operation(
+                                    PLAYER_FACTION_ID,
+                                    port_cell_index,
+                                    target_cell_index,
+                                    commit_percent,
+                                )
+                            } else {
+                                Err("no_active_match".to_string())
                             };
-                            if let Ok(json) = serde_json::to_string(&response) { let _ = tx.try_send(Message::Text(json.into())); }
+                            let response = match result {
+                                Ok(out) => ServerMessage::AttackResult {
+                                    accepted: true,
+                                    source_cell_index: port_cell_index,
+                                    target_cell_index,
+                                    front_id: Some(out.front_id),
+                                    deployed_population: out.deployed_population,
+                                    reason: "accepted".to_string(),
+                                },
+                                Err(reason) => ServerMessage::AttackResult {
+                                    accepted: false,
+                                    source_cell_index: port_cell_index,
+                                    target_cell_index,
+                                    front_id: None,
+                                    deployed_population: 0.0,
+                                    reason,
+                                },
+                            };
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(json.into()));
+                            }
                         }
                         ClientMessage::OfferAlliance { faction_id } => {
-                            let (result, pending) = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
+                            let (result, pending) = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
                                 let result = am.sim.offer_alliance(PLAYER_FACTION_ID, faction_id);
-                                let pending = result.as_ref().is_ok_and(|proposal| am.sim.has_pending_alliance(*proposal));
+                                let pending = result
+                                    .as_ref()
+                                    .is_ok_and(|proposal| am.sim.has_pending_alliance(*proposal));
                                 (result, pending)
-                            } else { (Err("no_active_match".to_string()), false) };
-                            let response = match result {
-                                Ok(alliance_id) => ServerMessage::AllianceResult { accepted: true, faction_id, alliance_id: Some(alliance_id), pending, reason: "accepted".to_string() },
-                                Err(reason) => ServerMessage::AllianceResult { accepted: false, faction_id, alliance_id: None, pending: false, reason },
+                            } else {
+                                (Err("no_active_match".to_string()), false)
                             };
-                            if let Ok(json) = serde_json::to_string(&response) { let _ = tx.try_send(Message::Text(json.into())); }
+                            let response = match result {
+                                Ok(alliance_id) => ServerMessage::AllianceResult {
+                                    accepted: true,
+                                    faction_id,
+                                    alliance_id: Some(alliance_id),
+                                    pending,
+                                    reason: "accepted".to_string(),
+                                },
+                                Err(reason) => ServerMessage::AllianceResult {
+                                    accepted: false,
+                                    faction_id,
+                                    alliance_id: None,
+                                    pending: false,
+                                    reason,
+                                },
+                            };
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(json.into()));
+                            }
                         }
-                        ClientMessage::AllianceResponse { proposal_id, accept } => {
-                            let result = if let Some(am) = match_runtime.write().await.active_match.as_mut() {
-                                am.sim.respond_alliance(PLAYER_FACTION_ID, proposal_id, accept)
-                            } else { Err("no_active_match".to_string()) };
-                            let response = match result {
-                                Ok(alliance_id) => ServerMessage::AllianceResult { accepted: true, faction_id: PLAYER_FACTION_ID, alliance_id: Some(alliance_id), pending: false, reason: "accepted".to_string() },
-                                Err(reason) => ServerMessage::AllianceResult { accepted: false, faction_id: PLAYER_FACTION_ID, alliance_id: None, pending: false, reason },
+                        ClientMessage::AllianceResponse {
+                            proposal_id,
+                            accept,
+                        } => {
+                            let result = if let Some(am) =
+                                match_runtime.write().await.active_match.as_mut()
+                            {
+                                am.sim
+                                    .respond_alliance(PLAYER_FACTION_ID, proposal_id, accept)
+                            } else {
+                                Err("no_active_match".to_string())
                             };
-                            if let Ok(json) = serde_json::to_string(&response) { let _ = tx.try_send(Message::Text(json.into())); }
+                            let response = match result {
+                                Ok(alliance_id) => ServerMessage::AllianceResult {
+                                    accepted: true,
+                                    faction_id: PLAYER_FACTION_ID,
+                                    alliance_id: Some(alliance_id),
+                                    pending: false,
+                                    reason: "accepted".to_string(),
+                                },
+                                Err(reason) => ServerMessage::AllianceResult {
+                                    accepted: false,
+                                    faction_id: PLAYER_FACTION_ID,
+                                    alliance_id: None,
+                                    pending: false,
+                                    reason,
+                                },
+                            };
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = tx.try_send(Message::Text(json.into()));
+                            }
                         }
                         ClientMessage::RequestSnapshot => {
+                            let request_count =
+                                OWNERSHIP_RESYNC_REQUESTS.fetch_add(1, Ordering::Relaxed) + 1;
+                            eprintln!("[NET OWNERSHIP] authoritative snapshot requested by {}; total_resyncs={}", addr, request_count);
                             let snapshot = {
                                 let rt = match_runtime.read().await;
-                                rt.active_match.as_ref().map(|am| ServerMessage::WorldSnapshot {
-                                    tick: am.sim.tick,
-                                    sequence: am.sim.sequence,
-                                    width: WORLD_WIDTH as u16,
-                                    height: WORLD_HEIGHT as u16,
-                                    total_cells: TOTAL_CELLS as u32,
-                                    your_faction_id: PLAYER_FACTION_ID,
-                                    factions: am.sim.factions.clone(),
-                                    fronts: am.sim.combat_manager.get_front_infos(),
-                                    match_state: match_state_info(rt.phase, Some(am)),
-                                    strategic_sites: am.sim.strategic_sites.clone(),
-                                    ports: am.sim.port_states(),
-                                    alliances: am.sim.alliance_states(),
-                                    pending_alliances: am.sim.pending_alliance_states(),
-                                    cells: am.sim.get_snapshot_cells(),
-                                })
+                                rt.active_match
+                                    .as_ref()
+                                    .map(|am| ServerMessage::WorldSnapshot {
+                                        tick: am.sim.tick,
+                                        sequence: am.sim.sequence,
+                                        ownership_revision: am.sim.sequence,
+                                        width: WORLD_WIDTH as u16,
+                                        height: WORLD_HEIGHT as u16,
+                                        total_cells: TOTAL_CELLS as u32,
+                                        your_faction_id: PLAYER_FACTION_ID,
+                                        factions: am.sim.factions.clone(),
+                                        fronts: am.sim.combat_manager.get_front_infos(),
+                                        match_state: match_state_info(rt.phase, Some(am)),
+                                        strategic_sites: am.sim.strategic_sites.clone(),
+                                        ports: am.sim.port_states(),
+                                        alliances: am.sim.alliance_states(),
+                                        pending_alliances: am.sim.pending_alliance_states(),
+                                        cells: am.sim.get_snapshot_cells(),
+                                    })
                             };
                             if let Some(snapshot) = snapshot {
                                 if let Ok(snapshot_json) = serde_json::to_string(&snapshot) {
-                                    let _ = tx.try_send(Message::Text(snapshot_json.into()));
+                                    // This path is intentionally awaited: the
+                                    // snapshot is the recovery mechanism for a
+                                    // missed ownership revision and must not be
+                                    // discarded when the peer queue is full.
+                                    let _ = tx.send(Message::Text(snapshot_json.into())).await;
                                 }
                             }
                         }
@@ -1019,7 +1437,10 @@ async fn handle_connection(
                                 let _ = tx.try_send(Message::Text(json.into()));
                             }
                         }
-                        ClientMessage::AuthSessionResume { account_id, session_token } => {
+                        ClientMessage::AuthSessionResume {
+                            account_id,
+                            session_token,
+                        } => {
                             let snap = {
                                 let ms = meta_store.read().unwrap();
                                 ms.resume_session(&account_id, &session_token)
@@ -1042,13 +1463,20 @@ async fn handle_connection(
                                     let _ = tx.try_send(Message::Text(json.into()));
                                 }
                             } else {
-                                let err = ServerMessage::AuthError { error: "INVALID_SESSION".to_string() };
+                                let err = ServerMessage::AuthError {
+                                    error: "INVALID_SESSION".to_string(),
+                                };
                                 if let Ok(json) = serde_json::to_string(&err) {
                                     let _ = tx.try_send(Message::Text(json.into()));
                                 }
                             }
                         }
-                        ClientMessage::AuthLinkAccount { account_id, session_token, provider, identifier } => {
+                        ClientMessage::AuthLinkAccount {
+                            account_id,
+                            session_token,
+                            provider,
+                            identifier,
+                        } => {
                             let res = {
                                 let mut ms = meta_store.write().unwrap();
                                 ms.link_account(&account_id, &session_token, &provider, &identifier)
@@ -1072,9 +1500,12 @@ async fn handle_connection(
                                         let _ = tx.try_send(Message::Text(json.into()));
                                     }
                                 }
-                                Err(meta_store::LinkError::Conflict { existing_account_id }) => {
+                                Err(meta_store::LinkError::Conflict {
+                                    existing_account_id,
+                                }) => {
                                     let conflict = ServerMessage::AuthConflict {
-                                        message: "THIS SIGN-IN BELONGS TO AN EXISTING DOMINION".to_string(),
+                                        message: "THIS SIGN-IN BELONGS TO AN EXISTING DOMINION"
+                                            .to_string(),
                                         existing_account_id,
                                     };
                                     if let Ok(json) = serde_json::to_string(&conflict) {
@@ -1082,14 +1513,19 @@ async fn handle_connection(
                                     }
                                 }
                                 Err(meta_store::LinkError::InvalidCredentials) => {
-                                    let err = ServerMessage::AuthError { error: "INVALID_CREDENTIALS".to_string() };
+                                    let err = ServerMessage::AuthError {
+                                        error: "INVALID_CREDENTIALS".to_string(),
+                                    };
                                     if let Ok(json) = serde_json::to_string(&err) {
                                         let _ = tx.try_send(Message::Text(json.into()));
                                     }
                                 }
                             }
                         }
-                        ClientMessage::WalletGetSnapshot { account_id, session_token } => {
+                        ClientMessage::WalletGetSnapshot {
+                            account_id,
+                            session_token,
+                        } => {
                             let snap = {
                                 let ms = meta_store.read().unwrap();
                                 ms.resume_session(&account_id, &session_token)
@@ -1112,7 +1548,12 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::CommercePurchase { account_id, session_token, sku, idempotency_key } => {
+                        ClientMessage::CommercePurchase {
+                            account_id,
+                            session_token,
+                            sku,
+                            idempotency_key,
+                        } => {
                             let res = {
                                 let mut ms = meta_store.write().unwrap();
                                 ms.purchase_sku(&account_id, &session_token, &sku, &idempotency_key)
@@ -1146,9 +1587,13 @@ async fn handle_connection(
                                 }
                                 Err(err) => {
                                     let err_msg = match err {
-                                        meta_store::PurchaseError::InsufficientBalance => "INSUFFICIENT_BALANCE",
+                                        meta_store::PurchaseError::InsufficientBalance => {
+                                            "INSUFFICIENT_BALANCE"
+                                        }
                                         meta_store::PurchaseError::UnknownSku => "UNKNOWN_SKU",
-                                        meta_store::PurchaseError::InvalidCredentials => "INVALID_CREDENTIALS",
+                                        meta_store::PurchaseError::InvalidCredentials => {
+                                            "INVALID_CREDENTIALS"
+                                        }
                                     };
                                     let comm_res = ServerMessage::CommerceResult {
                                         success: false,
@@ -1162,10 +1607,20 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::EquipLoadout { account_id, session_token, blade_skin, reaction_wheel } => {
+                        ClientMessage::EquipLoadout {
+                            account_id,
+                            session_token,
+                            blade_skin,
+                            reaction_wheel,
+                        } => {
                             let res = {
                                 let mut ms = meta_store.write().unwrap();
-                                ms.equip_loadout(&account_id, &session_token, blade_skin, reaction_wheel)
+                                ms.equip_loadout(
+                                    &account_id,
+                                    &session_token,
+                                    blade_skin,
+                                    reaction_wheel,
+                                )
                             };
                             if let Ok(snap) = res {
                                 let snap_msg = ServerMessage::AuthSnapshot {
@@ -1185,10 +1640,22 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::DevMetaCommand { account_id, session_token, action, marks_delta, sku } => {
+                        ClientMessage::DevMetaCommand {
+                            account_id,
+                            session_token,
+                            action,
+                            marks_delta,
+                            sku,
+                        } => {
                             let res = {
                                 let mut ms = meta_store.write().unwrap();
-                                ms.dev_command(&account_id, &session_token, &action, marks_delta, sku)
+                                ms.dev_command(
+                                    &account_id,
+                                    &session_token,
+                                    &action,
+                                    marks_delta,
+                                    sku,
+                                )
                             };
                             match res {
                                 Ok(snap) => {
@@ -1219,10 +1686,16 @@ async fn handle_connection(
                                 }
                             }
                         }
-                        ClientMessage::DevCleanMatch { civilization_id, seed, paused } => {
+                        ClientMessage::DevCleanMatch {
+                            civilization_id,
+                            seed,
+                            paused,
+                        } => {
                             let clean_seed = seed.unwrap_or(42);
-                            let new_sim = Simulation::new_standard(civilization_id.as_deref(), clean_seed);
-                            let new_bot_manager = BotManager::with_seed(43, clean_seed.wrapping_add(1));
+                            let new_sim =
+                                Simulation::new_standard(civilization_id.as_deref(), clean_seed);
+                            let new_bot_manager =
+                                BotManager::with_seed(43, clean_seed.wrapping_add(1));
 
                             println!("=== DEV CLEAN MATCH TICK 0 AUDIT ===");
                             println!("tick\tfaction_id\tciv_id\tterritory_count\tland_area_km2\tpopulation\tcapital_cell");
@@ -1241,7 +1714,10 @@ async fn handle_connection(
                             println!("=== END TICK 0 AUDIT ===");
 
                             let mut rt = match_runtime.write().await;
-                            let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                            let now_secs = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_secs();
                             let clean_match_id = format!("dev_clean_{}_{}", clean_seed, now_secs);
                             rt.active_match = Some(ActiveMatch {
                                 match_id: clean_match_id,
@@ -1250,7 +1726,11 @@ async fn handle_connection(
                                 bot_manager: new_bot_manager,
                                 pre_match_failsafe_ticks: 0,
                             });
-                            rt.phase = if paused == Some(true) { MatchPhase::PreMatch } else { MatchPhase::Running };
+                            rt.phase = if paused == Some(true) {
+                                MatchPhase::PreMatch
+                            } else {
+                                MatchPhase::Running
+                            };
                             rt.human_session_count = 1;
                             rt.dev_paused = paused.unwrap_or(false);
                             if rt.dev_paused {
@@ -1262,6 +1742,7 @@ async fn handle_connection(
                                 let snapshot = ServerMessage::WorldSnapshot {
                                     tick: am.sim.tick,
                                     sequence: am.sim.sequence,
+                                    ownership_revision: am.sim.sequence,
                                     width: WORLD_WIDTH as u16,
                                     height: WORLD_HEIGHT as u16,
                                     total_cells: TOTAL_CELLS as u32,
@@ -1315,7 +1796,10 @@ async fn handle_connection(
 }
 
 async fn run_headless_test(seed: u64, requested_steps: u64) {
-    println!("--- HEADLESS ACCELERATED SIMULATION seed={} steps={} ---", seed, requested_steps);
+    println!(
+        "--- HEADLESS ACCELERATED SIMULATION seed={} steps={} ---",
+        seed, requested_steps
+    );
     let mut sim = Simulation::with_seed(101, seed);
     let mut bot_manager = BotManager::with_seed(AI_FACTION_COUNT, seed);
 
@@ -1361,7 +1845,8 @@ async fn run_headless_test(seed: u64, requested_steps: u64) {
         completed_steps = i;
 
         if i % 200 == 0 {
-            sim.validate_invariants().expect("headless invariant failure");
+            sim.validate_invariants()
+                .expect("headless invariant failure");
         }
         if i % 1_000 == 0 {
             let (disconnected, holes) = sim.topology_violations();
@@ -1373,13 +1858,17 @@ async fn run_headless_test(seed: u64, requested_steps: u64) {
             report_stats(i, &sim, &bot_manager);
         }
         if sim.match_over {
-            println!("matchFinishedAtTick={} winner={:?}", sim.tick, sim.winner_faction_id);
+            println!(
+                "matchFinishedAtTick={} winner={:?}",
+                sim.tick, sim.winner_faction_id
+            );
             break;
         }
     }
     tick_samples.sort_by(|a, b| a.total_cmp(b));
     let average = tick_samples.iter().sum::<f64>() / tick_samples.len().max(1) as f64;
-    let p95_index = ((tick_samples.len() as f64 * 0.95).floor() as usize).min(tick_samples.len().saturating_sub(1));
+    let p95_index = ((tick_samples.len() as f64 * 0.95).floor() as usize)
+        .min(tick_samples.len().saturating_sub(1));
     let p95 = tick_samples.get(p95_index).copied().unwrap_or(0.0);
     let max = tick_samples.last().copied().unwrap_or(0.0);
     println!("headlessSteps={} avgTickMs={:.3} p95TickMs={:.3} maxTickMs={:.3} botAttempts={} botAccepted={} matchOver={}", completed_steps, average, p95, max, bot_manager.attempts, bot_manager.accepted, sim.match_over);
@@ -1475,10 +1964,10 @@ fn cardinal_indices(i: usize) -> Vec<usize> {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use crate::simulation::Simulation;
     use crate::bot::BotManager;
+    use crate::simulation::Simulation;
     use crate::world_map::{TOTAL_CELLS, WORLD_HEIGHT, WORLD_WIDTH};
-    
+
     #[test]
     fn test_zero_player_progression() {
         let mut sim = Simulation::new(101);

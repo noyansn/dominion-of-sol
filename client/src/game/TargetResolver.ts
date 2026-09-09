@@ -1,6 +1,7 @@
 import type { PortStateInfo } from './Types';
 import { isVisualLand, VISUAL_MASK_WIDTH, VISUAL_MASK_HEIGHT } from '../render/VisualLandMask';
 import { getVisualGameplayMapping } from './VisualGameplayMapping';
+import microGapAdjacencyAsset from '../assets/world_micro_gap_adjacency_v1.json';
 
 export type SelectionRelation =
   | 'OWN_INTERIOR'
@@ -15,8 +16,9 @@ export type SelectionRelation =
 
 export type ContextAction =
   | 'NONE'
-  | 'EXPAND_FRONTIER'
+  | 'NEUTRAL_EXPANSION'
   | 'LAUNCH_OFFENSIVE'
+  | 'AMPHIBIOUS_COLONIZATION'
   | 'DEFEND'
   | 'BUILD_PORT'
   | 'ALLIANCE_INFO';
@@ -27,6 +29,7 @@ export interface TargetResolverState {
   totalCells: number;
   cellOwners: Uint8Array;
   cellTerrains: Uint8Array;
+  cellFlags: Uint8Array;
   yourFactionId: number;
   visualLandMask?: Uint8Array | null;
   visualMaskReady?: boolean;
@@ -59,7 +62,23 @@ export interface TargetResolution {
 }
 
 const WATER_TERRAIN = 2;
+const MEANINGFUL_OVERSEAS_FLAG = 1 << 4;
 const DEEP_HOSTILE_SEARCH_RADIUS = 96;
+
+const MICRO_GAP_NEIGHBOURS = new Map<number, number[]>();
+for (const edge of microGapAdjacencyAsset.edges) {
+  const a = edge.cell_a;
+  const b = edge.cell_b;
+  const aNeighbours = MICRO_GAP_NEIGHBOURS.get(a) ?? [];
+  aNeighbours.push(b);
+  MICRO_GAP_NEIGHBOURS.set(a, aNeighbours);
+  const bNeighbours = MICRO_GAP_NEIGHBOURS.get(b) ?? [];
+  bNeighbours.push(a);
+  MICRO_GAP_NEIGHBOURS.set(b, bNeighbours);
+}
+for (const neighboursForCell of MICRO_GAP_NEIGHBOURS.values()) {
+  neighboursForCell.sort((a, b) => a - b);
+}
 
 function cellIndex(state: TargetResolverState, x: number, y: number): number {
   return y * state.width + x;
@@ -98,6 +117,17 @@ function neighbours8(state: TargetResolverState, cell: number): number[] {
   return result;
 }
 
+function legalLandNeighbours(state: TargetResolverState, cell: number): number[] {
+  const result = neighbours8(state, cell)
+    .filter((neighbour) => hasLegalLandConnection(state, cell, neighbour));
+  for (const neighbour of MICRO_GAP_NEIGHBOURS.get(cell) ?? []) {
+    if (hasLegalLandConnection(state, cell, neighbour) && !result.includes(neighbour)) {
+      result.push(neighbour);
+    }
+  }
+  return result;
+}
+
 function isCoastal(state: TargetResolverState, cell: number): boolean {
   return neighbours(state, cell).some((index) => state.cellTerrains[index] === WATER_TERRAIN);
 }
@@ -127,6 +157,7 @@ export function hasLegalLandConnection(state: TargetResolverState, a: number, b:
   if (a < 0 || b < 0 || a >= state.totalCells || b >= state.totalCells) return false;
   if (state.cellTerrains[a] === WATER_TERRAIN || state.cellTerrains[b] === WATER_TERRAIN) return false;
   if (a === b) return true;
+  if (MICRO_GAP_NEIGHBOURS.get(a)?.includes(b) === true) return true;
 
   const ax = a % state.width;
   const ay = Math.floor(a / state.width);
@@ -151,14 +182,15 @@ export function hasLegalLandConnection(state: TargetResolverState, a: number, b:
   return false;
 }
 
-function nearestOwnNeighbour(state: TargetResolverState, cell: number): number | null {
+function nearestOwnNeighbour(state: TargetResolverState, cell: number, allowMicroGapTopology = false): number | null {
   const direct = neighbours(state, cell)
     .filter((index) => state.cellOwners[index] === state.yourFactionId && state.cellTerrains[index] !== WATER_TERRAIN && visualNeighbours(state, cell, index))
     .sort((a, b) => a - b)[0];
   if (direct !== undefined) return direct;
 
   // Fallback to legal diagonal neighbors (at least one intermediate orthogonal cell must be land)
-  return neighbours8(state, cell)
+  const candidates = allowMicroGapTopology ? legalLandNeighbours(state, cell) : neighbours8(state, cell);
+  return candidates
     .filter((index) => state.cellOwners[index] === state.yourFactionId && hasLegalLandConnection(state, cell, index))
     .sort((a, b) => a - b)[0] ?? null;
 }
@@ -219,8 +251,8 @@ function findLegalNeutralFrontier(state: TargetResolverState, targetCell: number
     const cx = curr % state.width;
     const cy = Math.floor(curr / state.width);
 
-    for (const n of neighbours8(state, curr)) {
-      if (hasLegalLandConnection(state, curr, n) && state.cellOwners[n] === state.yourFactionId) {
+    for (const n of legalLandNeighbours(state, curr)) {
+      if (state.cellOwners[n] === state.yourFactionId) {
         let dx = Math.abs(cx - targetX);
         if (dx > state.width / 2) dx = state.width - dx;
         const dy = Math.abs(cy - targetY);
@@ -235,8 +267,8 @@ function findLegalNeutralFrontier(state: TargetResolverState, targetCell: number
       break;
     }
 
-    for (const n of neighbours8(state, curr)) {
-      if (!visited.has(n) && state.cellOwners[n] === 0 && hasLegalLandConnection(state, curr, n)) {
+    for (const n of legalLandNeighbours(state, curr)) {
+      if (!visited.has(n) && state.cellOwners[n] === 0) {
         visited.add(n);
         queue.push(n);
       }
@@ -253,12 +285,13 @@ function baseResult(state: TargetResolverState, worldX: number, worldY: number):
   const rawX = Math.floor(worldX);
   const rawY = Math.floor(worldY);
   const rawCell = inBounds(state, rawX, rawY) ? cellIndex(state, rawX, rawY) : -1;
-  const canonicalLand = Boolean(
+  const isAuthoritativeLand = inBounds(state, rawX, rawY) && state.cellTerrains[rawCell] !== WATER_TERRAIN;
+  const isVisualLandPixel = Boolean(
     inBounds(state, rawX, rawY) &&
-    (state.visualMaskReady && state.visualLandMask
-      ? isVisualLand(state.visualLandMask, worldX, worldY)
-      : state.cellTerrains[rawCell] !== WATER_TERRAIN),
+    state.visualMaskReady && state.visualLandMask &&
+    isVisualLand(state.visualLandMask, worldX, worldY),
   );
+  const canonicalLand = isAuthoritativeLand || isVisualLandPixel;
   return {
     worldX, worldY, longitude, latitude, canonicalLand,
     visualComponentId: canonicalLand ? 'UNAVAILABLE (visual mask has no component IDs)' : 'water',
@@ -291,10 +324,14 @@ export function resolveTargetAtWorld(
     return result;
   }
 
-  let resolvedCell: number | null = result.rawCell;
+  let resolvedCell: number | null = null;
   if (state.visualMaskReady && state.visualLandMask) {
     resolvedCell = getVisualGameplayMapping(state.visualLandMask, VISUAL_MASK_WIDTH, VISUAL_MASK_HEIGHT,
       state.width, state.height, state.cellTerrains).cellAtWorld(worldX, worldY);
+  }
+  // If the mapping didn't find an alternate cell but the clicked cell itself is authoritative land, use it directly
+  if ((resolvedCell === null || resolvedCell < 0) && result.rawCell >= 0 && state.cellTerrains[result.rawCell] !== WATER_TERRAIN) {
+    resolvedCell = result.rawCell;
   }
   if (resolvedCell === null || resolvedCell < 0) {
     result.rejectionReason = 'The visible coastal fragment has no mapped gameplay land component.';
@@ -332,10 +369,10 @@ export function resolveTargetAtWorld(
   }
 
   if (result.ownerId === 0) {
-    const source = nearestOwnNeighbour(state, resolvedCell);
+    const source = nearestOwnNeighbour(state, resolvedCell, true);
     if (source !== null) {
       result.relation = 'ADJACENT_NEUTRAL';
-      result.action = 'EXPAND_FRONTIER';
+      result.action = 'NEUTRAL_EXPANSION';
       result.sourceCell = source;
       result.targetCell = resolvedCell;
       result.nearestLegalAnchor = resolvedCell;
@@ -344,7 +381,7 @@ export function resolveTargetAtWorld(
       const legalAnchor = findLegalNeutralFrontier(state, resolvedCell);
       if (legalAnchor !== null) {
         result.relation = 'REMOTE_NEUTRAL';
-        result.action = 'EXPAND_FRONTIER';
+        result.action = 'NEUTRAL_EXPANSION';
         result.sourceCell = legalAnchor.source;
         result.targetCell = resolvedCell;
         result.nearestLegalAnchor = legalAnchor.target;
@@ -352,8 +389,21 @@ export function resolveTargetAtWorld(
       } else {
         result.relation = 'REMOTE_NEUTRAL';
         result.targetCell = resolvedCell;
-        result.action = 'NONE';
-        result.rejectionReason = 'No legal neutral land route reaches this objective.';
+        const sourcePort = isCoastal(state, resolvedCell)
+          && (state.cellFlags[resolvedCell] & MEANINGFUL_OVERSEAS_FLAG) !== 0
+          ? completeOwnPort(state, resolvedCell)
+          : null;
+        if (sourcePort !== null) {
+          result.action = 'AMPHIBIOUS_COLONIZATION';
+          result.sourceCell = sourcePort;
+          result.nearestLegalAnchor = resolvedCell;
+          result.rejectionReason = 'Explicit overseas landing ready: completed port to selected neutral coast.';
+        } else {
+          result.action = 'NONE';
+          result.rejectionReason = (state.cellFlags[resolvedCell] & MEANINGFUL_OVERSEAS_FLAG) !== 0
+            ? 'This meaningful overseas coast requires a completed marked port.'
+            : 'No legal neutral land route reaches this unsupported fragment.';
+        }
       }
     }
     return result;
@@ -367,7 +417,10 @@ export function resolveTargetAtWorld(
     return result;
   }
 
-  const directSource = nearestOwnNeighbour(state, resolvedCell);
+  // Micro-gap topology simplifies neutral archipelago expansion only. A
+  // hostile operation still needs a physically local land border; it must
+  // never turn an island simplification into a cross-water attack.
+  const directSource = nearestOwnNeighbour(state, resolvedCell, false);
   if (directSource !== null) {
     result.relation = 'ADJACENT_HOSTILE';
     result.action = 'LAUNCH_OFFENSIVE';

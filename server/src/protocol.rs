@@ -149,6 +149,10 @@ pub enum ServerMessage {
     WorldSnapshot {
         tick: u64,
         sequence: u64,
+        /// Monotonic revision of authoritative ownership. Kept alongside
+        /// sequence for compatibility with existing clients.
+        #[serde(default)]
+        ownership_revision: u64,
         width: u16,
         height: u16,
         total_cells: u32,
@@ -169,6 +173,9 @@ pub enum ServerMessage {
     CellDeltaBatch {
         tick: u64,
         sequence: u64,
+        /// Revision of the complete owner grid after this batch.
+        #[serde(default)]
+        ownership_revision: u64,
         deltas: Vec<CellDelta>,
         fronts: Vec<FrontInfo>,
         match_state: MatchStateInfo,
@@ -208,11 +215,24 @@ pub enum ServerMessage {
 
     #[serde(rename = "port_result")]
     #[serde(rename_all = "camelCase")]
-    PortResult { accepted: bool, cell_index: u32, population_cost: f64, remaining_seconds: f64, reason: String },
+    PortResult {
+        accepted: bool,
+        cell_index: u32,
+        population_cost: f64,
+        remaining_seconds: f64,
+        reason: String,
+    },
 
     #[serde(rename = "alliance_result")]
     #[serde(rename_all = "camelCase")]
-    AllianceResult { accepted: bool, faction_id: u8, alliance_id: Option<u16>, #[serde(default)] pending: bool, reason: String },
+    AllianceResult {
+        accepted: bool,
+        faction_id: u8,
+        alliance_id: Option<u16>,
+        #[serde(default)]
+        pending: bool,
+        reason: String,
+    },
 
     #[serde(rename = "expand_result")]
     #[serde(rename_all = "camelCase")]
@@ -300,9 +320,7 @@ pub enum ServerMessage {
 
     #[serde(rename = "auth_error")]
     #[serde(rename_all = "camelCase")]
-    AuthError {
-        error: String,
-    },
+    AuthError { error: String },
 
     #[serde(rename = "commerce_result")]
     #[serde(rename_all = "camelCase")]
@@ -316,10 +334,7 @@ pub enum ServerMessage {
 
     #[serde(rename = "meta_error")]
     #[serde(rename_all = "camelCase")]
-    MetaError {
-        code: String,
-        message: String,
-    },
+    MetaError { code: String, message: String },
 
     #[serde(rename = "server_welcome")]
     #[serde(rename_all = "camelCase")]
@@ -349,6 +364,8 @@ pub enum ServerMessage {
         current_tick: u64,
         phase: String,
         alive_factions: usize,
+        #[serde(default)]
+        owner_grid_hash: String,
     },
 }
 
@@ -454,10 +471,7 @@ pub enum ClientMessage {
 
     #[serde(rename = "defense_focus")]
     #[serde(rename_all = "camelCase")]
-    DefenseFocus {
-        cell_index: u32,
-        population: f64,
-    },
+    DefenseFocus { cell_index: u32, population: f64 },
 
     #[serde(rename = "release_defense_focus")]
     #[serde(rename_all = "camelCase")]
@@ -563,9 +577,7 @@ pub enum ClientMessage {
 
     #[serde(rename = "dev_set_paused")]
     #[serde(rename_all = "camelCase")]
-    DevSetPaused {
-        paused: bool,
-    },
+    DevSetPaused { paused: bool },
 }
 
 fn default_commit_percent() -> f64 {
@@ -579,10 +591,11 @@ mod tests {
     #[test]
     fn test_protocol_contract() {
         assert_eq!(PROTOCOL_VERSION, "1.0.0");
-        
+
         let ws = ServerMessage::WorldSnapshot {
             tick: 1,
             sequence: 1,
+            ownership_revision: 1,
             width: 1024,
             height: 512,
             total_cells: 524288,
@@ -605,7 +618,7 @@ mod tests {
             pending_alliances: vec![],
             cells: vec![],
         };
-        
+
         let json = serde_json::to_string(&ws).unwrap();
         assert!(json.contains("\"width\":1024"));
         assert!(json.contains("\"height\":512"));
@@ -684,9 +697,16 @@ mod tests {
         assert!(json.contains("\"playerName\":\"NOYAN\""));
         assert!(json.contains("\"reactionId\":\"reaction_turk_salute\""));
 
-        let client_rx: ClientMessage = serde_json::from_str(r#"{"type":"send_reaction","reactionId":"reaction_salute","cellIndex":500}"#).unwrap();
+        let client_rx: ClientMessage = serde_json::from_str(
+            r#"{"type":"send_reaction","reactionId":"reaction_salute","cellIndex":500}"#,
+        )
+        .unwrap();
         match client_rx {
-            ClientMessage::SendReaction { reaction_id, cell_index, .. } => {
+            ClientMessage::SendReaction {
+                reaction_id,
+                cell_index,
+                ..
+            } => {
                 assert_eq!(reaction_id, "reaction_salute");
                 assert_eq!(cell_index, Some(500));
             }

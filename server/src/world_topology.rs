@@ -87,7 +87,8 @@ impl WorldTopology {
                 return Err("Truncated cell record".to_string());
             }
 
-            let cell_index = u32::from_le_bytes(split_bytes[offset..offset + 4].try_into().unwrap());
+            let cell_index =
+                u32::from_le_bytes(split_bytes[offset..offset + 4].try_into().unwrap());
             if cell_index >= 1024 * 512 {
                 return Err("Invalid cell index".to_string());
             }
@@ -120,7 +121,8 @@ impl WorldTopology {
                 }
 
                 let area_pixels = split_bytes[offset + 1];
-                let local_mask = u16::from_le_bytes(split_bytes[offset + 2..offset + 4].try_into().unwrap());
+                let local_mask =
+                    u16::from_le_bytes(split_bytes[offset + 2..offset + 4].try_into().unwrap());
                 if local_mask == 0 {
                     return Err("Zero piece mask".to_string());
                 }
@@ -133,7 +135,8 @@ impl WorldTopology {
                     return Err("Area pixels mismatch with mask popcount".to_string());
                 }
 
-                let neighbor_count = u16::from_le_bytes(split_bytes[offset + 4..offset + 6].try_into().unwrap());
+                let neighbor_count =
+                    u16::from_le_bytes(split_bytes[offset + 4..offset + 6].try_into().unwrap());
                 offset += 8;
 
                 if offset + (neighbor_count as usize * 4) > split_bytes.len() {
@@ -144,7 +147,8 @@ impl WorldTopology {
                 let mut last_neighbor = None;
 
                 for _ in 0..neighbor_count {
-                    let neighbor_id = u32::from_le_bytes(split_bytes[offset..offset + 4].try_into().unwrap());
+                    let neighbor_id =
+                        u32::from_le_bytes(split_bytes[offset..offset + 4].try_into().unwrap());
                     if neighbor_id >> 3 >= 1024 * 512 {
                         return Err("Invalid neighbor cell index".to_string());
                     }
@@ -201,12 +205,16 @@ impl WorldTopology {
     }
 
     pub fn is_split_cell(&self, cell_index: u32) -> bool {
-        if cell_index >= 1024 * 512 { return false; }
+        if cell_index >= 1024 * 512 {
+            return false;
+        }
         self.split_index_by_cell[cell_index as usize] != u16::MAX
     }
 
     pub fn piece_count(&self, cell_index: u32) -> u8 {
-        if cell_index >= 1024 * 512 { return 0; }
+        if cell_index >= 1024 * 512 {
+            return 0;
+        }
         let idx = self.split_index_by_cell[cell_index as usize];
         if idx == u16::MAX {
             // It's normal or water. Since we don't know water definitively without full support grid,
@@ -221,7 +229,9 @@ impl WorldTopology {
     pub fn piece_mask(&self, node: TopoNodeId) -> Option<u16> {
         let cell_index = node.0 >> 3;
         let piece_id = (node.0 & 0x7) as u8;
-        if cell_index >= 1024 * 512 { return None; }
+        if cell_index >= 1024 * 512 {
+            return None;
+        }
         let idx = self.split_index_by_cell[cell_index as usize];
         if idx == u16::MAX {
             if piece_id == 0 {
@@ -241,7 +251,9 @@ impl WorldTopology {
     pub fn piece_area_pixels(&self, node: TopoNodeId) -> Option<u8> {
         let cell_index = node.0 >> 3;
         let piece_id = (node.0 & 0x7) as u8;
-        if cell_index >= 1024 * 512 { return None; }
+        if cell_index >= 1024 * 512 {
+            return None;
+        }
         let idx = self.split_index_by_cell[cell_index as usize];
         if idx == u16::MAX {
             return None; // Phase R1: do not return area for normal cells
@@ -265,11 +277,13 @@ impl WorldTopology {
     pub fn contains_node(&self, node: TopoNodeId) -> bool {
         let cell_index = node.0 >> 3;
         let piece_id = (node.0 & 0x7) as u8;
-        if cell_index >= 1024 * 512 { return false; }
+        if cell_index >= 1024 * 512 {
+            return false;
+        }
         let idx = self.split_index_by_cell[cell_index as usize];
         if idx == u16::MAX {
             // If normal, piece_id must be 0.
-            return piece_id == 0; 
+            return piece_id == 0;
         }
         piece_id < self.split_cells[idx as usize].pieces.len() as u8
     }
@@ -281,21 +295,23 @@ impl WorldTopology {
 
         let cell_index = node.0 >> 3;
         let idx = self.split_index_by_cell[cell_index as usize];
-        
+
         if idx != u16::MAX {
             // Split piece
             let piece_id = (node.0 & 0x7) as u8;
-            return self.split_cells[idx as usize].pieces[piece_id as usize].neighbors.clone();
+            return self.split_cells[idx as usize].pieces[piece_id as usize]
+                .neighbors
+                .clone();
         }
 
         // Normal node
         let mut result = Vec::new();
         let mask = self.normal_edges[cell_index as usize];
-        
+
         // North
         if (mask & 1) != 0 {
             let n_idx = (cell_index + 1024 * 512 - 1024) % (1024 * 512); // Wrap N/S? No north/south wrap technically, but let's just use exact math
-            // Wait, world wrap is horizontal. N/S wrap is not allowed for bounds!
+                                                                         // Wait, world wrap is horizontal. N/S wrap is not allowed for bounds!
             if cell_index >= 1024 {
                 result.push(TopoNodeId((cell_index - 1024) << 3));
             }
@@ -336,8 +352,12 @@ impl WorldTopology {
         for &(dx, dy) in &dirs {
             let mut nx = cx + dx;
             let ny = cy + dy;
-            if nx < 0 { nx += 1024; }
-            if nx >= 1024 { nx -= 1024; }
+            if nx < 0 {
+                nx += 1024;
+            }
+            if nx >= 1024 {
+                nx -= 1024;
+            }
             if ny >= 0 && ny < 512 {
                 let n_cell = (ny * 1024 + nx) as u32;
                 let s_idx = self.split_index_by_cell[n_cell as usize];
@@ -351,7 +371,7 @@ impl WorldTopology {
                 }
             }
         }
-        
+
         result.sort();
         result.dedup();
         result
@@ -362,15 +382,25 @@ impl WorldTopology {
         // For efficiency, we could check B's neighbors if B is a split cell, since it's faster.
         let cell_a = a.0 >> 3;
         let cell_b = b.0 >> 3;
-        
-        let a_split = if cell_a < 1024*512 { self.split_index_by_cell[cell_a as usize] != u16::MAX } else { false };
-        let b_split = if cell_b < 1024*512 { self.split_index_by_cell[cell_b as usize] != u16::MAX } else { false };
-        
+
+        let a_split = if cell_a < 1024 * 512 {
+            self.split_index_by_cell[cell_a as usize] != u16::MAX
+        } else {
+            false
+        };
+        let b_split = if cell_b < 1024 * 512 {
+            self.split_index_by_cell[cell_b as usize] != u16::MAX
+        } else {
+            false
+        };
+
         if a_split {
             let idx = self.split_index_by_cell[cell_a as usize];
             let p_id = (a.0 & 0x7) as usize;
             if p_id < self.split_cells[idx as usize].pieces.len() {
-                return self.split_cells[idx as usize].pieces[p_id].neighbors.contains(&b);
+                return self.split_cells[idx as usize].pieces[p_id]
+                    .neighbors
+                    .contains(&b);
             }
             return false;
         }
@@ -378,7 +408,9 @@ impl WorldTopology {
             let idx = self.split_index_by_cell[cell_b as usize];
             let p_id = (b.0 & 0x7) as usize;
             if p_id < self.split_cells[idx as usize].pieces.len() {
-                return self.split_cells[idx as usize].pieces[p_id].neighbors.contains(&a);
+                return self.split_cells[idx as usize].pieces[p_id]
+                    .neighbors
+                    .contains(&a);
             }
             return false;
         }
@@ -387,16 +419,24 @@ impl WorldTopology {
         if !self.contains_node(a) || !self.contains_node(b) {
             return false;
         }
-        
+
         let mask = self.normal_edges[cell_a as usize];
         let cx = cell_a % 1024;
         let cy = cell_a / 1024;
-        
-        if (mask & 1) != 0 && cy > 0 && cell_b == cell_a - 1024 { return true; }
-        if (mask & 2) != 0 && cell_b == cy * 1024 + (cx + 1) % 1024 { return true; }
-        if (mask & 4) != 0 && cy < 511 && cell_b == cell_a + 1024 { return true; }
-        if (mask & 8) != 0 && cell_b == cy * 1024 + (cx + 1024 - 1) % 1024 { return true; }
-        
+
+        if (mask & 1) != 0 && cy > 0 && cell_b == cell_a - 1024 {
+            return true;
+        }
+        if (mask & 2) != 0 && cell_b == cy * 1024 + (cx + 1) % 1024 {
+            return true;
+        }
+        if (mask & 4) != 0 && cy < 511 && cell_b == cell_a + 1024 {
+            return true;
+        }
+        if (mask & 8) != 0 && cell_b == cy * 1024 + (cx + 1024 - 1) % 1024 {
+            return true;
+        }
+
         false
     }
 }
@@ -407,23 +447,27 @@ mod tests {
 
     #[test]
     fn test_loads_final_assets() {
-        let topo = WorldTopology::load("assets/world_land_edges_micro_v1.bin", "assets/world_split_topology_v1.bin").unwrap();
-        
+        let topo = WorldTopology::load(
+            "assets/world_land_edges_micro_v1.bin",
+            "assets/world_split_topology_v1.bin",
+        )
+        .unwrap();
+
         // dimensions_match
         assert_eq!(topo.normal_edges.len(), 1024 * 512);
-        
+
         // split_counts_match
         assert_eq!(topo.split_cells.len(), 2899);
         let pieces: usize = topo.split_cells.iter().map(|c| c.pieces.len()).sum();
         assert_eq!(pieces, 6166);
-        
+
         // final_counts_are
         // We know from metadata: splitCells = 2899, splitPieces = 6166, totalNodes = 184715.
         // We know from metadata: splitCells = 2899, splitPieces = 6166, totalNodes = 184715.
         // Let's just verify the internal logic
-        
+
         // split_masks_disjoint & piece_area_matches_popcount is checked in load()
-        
+
         // hybrid_graph_symmetric
         // let's do a fast symmetry check on a few
         let mut symmetry_ok = true;
@@ -440,16 +484,16 @@ mod tests {
         }
         assert!(symmetry_ok);
     }
-    
+
     #[test]
     fn test_malformed_assets() {
         // bad magic
         let mut split = vec![0u8; 128];
         split[0..8].copy_from_slice(b"BADMAGIC");
         // write fake normal
-        std::fs::write("target/tmp_normal.bin", vec![0u8; 1024*512]).unwrap();
+        std::fs::write("target/tmp_normal.bin", vec![0u8; 1024 * 512]).unwrap();
         std::fs::write("target/tmp_split.bin", &split).unwrap();
-        
+
         let res = WorldTopology::load("target/tmp_normal.bin", "target/tmp_split.bin");
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "Invalid magic");

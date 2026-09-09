@@ -1093,34 +1093,91 @@ mod tests {
 
     #[test]
     fn test_task_14_civilization_doctrines_fairness_and_effects_gate() {
-        assert_eq!(civilization_count(), 44, "Atlas must contain exactly 44 canonical civilizations");
+        assert_eq!(
+            civilization_count(),
+            44,
+            "Atlas must contain exactly 44 canonical civilizations"
+        );
 
-        println!("{:<16} | {:<8} | {:<8} | {:<9} | {:<8} | {:<10}", "Civilization", "Offense", "Defense", "Expansion", "Maritime", "Net Budget");
-        println!("{:-<16}-|-{:-<8}-|-{:-<8}-|-{:-<9}-|-{:-<8}-|-{:-<10}", "", "", "", "", "", "");
+        println!(
+            "{:<16} | {:<8} | {:<8} | {:<9} | {:<8} | {:<10}",
+            "Civilization", "Offense", "Defense", "Expansion", "Maritime", "Net Budget"
+        );
+        println!(
+            "{:-<16}-|-{:-<8}-|-{:-<8}-|-{:-<9}-|-{:-<8}-|-{:-<10}",
+            "", "", "", "", "", ""
+        );
 
         let mut has_hun = false;
         let mut has_gokturk = false;
         let mut has_turk = false;
 
         for civ in CANONICAL_CIVILIZATIONS {
-            assert!(civ.doctrine_offense.is_finite(), "Offense modifier must be finite for {}", civ.id);
-            assert!(civ.doctrine_defense.is_finite(), "Defense modifier must be finite for {}", civ.id);
-            assert!(civ.doctrine_expansion.is_finite(), "Expansion modifier must be finite for {}", civ.id);
-            assert!(civ.doctrine_maritime.is_finite(), "Maritime modifier must be finite for {}", civ.id);
+            assert!(
+                civ.doctrine_offense.is_finite(),
+                "Offense modifier must be finite for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_defense.is_finite(),
+                "Defense modifier must be finite for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_expansion.is_finite(),
+                "Expansion modifier must be finite for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_maritime.is_finite(),
+                "Maritime modifier must be finite for {}",
+                civ.id
+            );
 
-            let net_budget = civ.doctrine_offense + civ.doctrine_defense + civ.doctrine_expansion + civ.doctrine_maritime;
-            assert!(net_budget.abs() < 0.001, "Civilization {} must have zero-sum balanced doctrine budget! Got net: {:.4}", civ.id, net_budget);
+            let net_budget = civ.doctrine_offense
+                + civ.doctrine_defense
+                + civ.doctrine_expansion
+                + civ.doctrine_maritime;
+            assert!(
+                net_budget.abs() < 0.001,
+                "Civilization {} must have zero-sum balanced doctrine budget! Got net: {:.4}",
+                civ.id,
+                net_budget
+            );
 
-            assert!(civ.doctrine_offense.abs() <= 0.071, "Offense modifier must remain subtle (<= 7%) for {}", civ.id);
-            assert!(civ.doctrine_defense.abs() <= 0.071, "Defense modifier must remain subtle (<= 7%) for {}", civ.id);
-            assert!(civ.doctrine_expansion.abs() <= 0.071, "Expansion modifier must remain subtle (<= 7%) for {}", civ.id);
-            assert!(civ.doctrine_maritime.abs() <= 0.071, "Maritime modifier must remain subtle (<= 7%) for {}", civ.id);
+            assert!(
+                civ.doctrine_offense.abs() <= 0.071,
+                "Offense modifier must remain subtle (<= 7%) for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_defense.abs() <= 0.071,
+                "Defense modifier must remain subtle (<= 7%) for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_expansion.abs() <= 0.071,
+                "Expansion modifier must remain subtle (<= 7%) for {}",
+                civ.id
+            );
+            assert!(
+                civ.doctrine_maritime.abs() <= 0.071,
+                "Maritime modifier must remain subtle (<= 7%) for {}",
+                civ.id
+            );
 
-            if civ.id == "hun" { has_hun = true; }
-            if civ.id == "gokturk" { has_gokturk = true; }
-            if civ.id == "turk" { has_turk = true; }
+            if civ.id == "hun" {
+                has_hun = true;
+            }
+            if civ.id == "gokturk" {
+                has_gokturk = true;
+            }
+            if civ.id == "turk" {
+                has_turk = true;
+            }
 
-            println!("{:<16} | {:+7.2}% | {:+7.2}% | {:+8.2}% | {:+7.2}% | {:+9.4}",
+            println!(
+                "{:<16} | {:+7.2}% | {:+7.2}% | {:+8.2}% | {:+7.2}% | {:+9.4}",
                 civ.display_name,
                 civ.doctrine_offense * 100.0,
                 civ.doctrine_defense * 100.0,
@@ -1131,37 +1188,68 @@ mod tests {
         }
 
         assert!(has_hun, "HUN canonical civilization must be present");
-        assert!(has_gokturk, "GÖKTÜRK canonical civilization must be present");
-        assert!(!has_turk, "Generic TÜRK must be retired from canonical roster");
+        assert!(
+            has_gokturk,
+            "GÖKTÜRK canonical civilization must be present"
+        );
+        assert!(
+            !has_turk,
+            "Generic TÜRK must be retired from canonical roster"
+        );
 
         // Section 83: Civilization Effect Tests
         // 1. Offense effect
-        let power_high = crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.05, 1.0);
-        let power_neutral = crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.00, 1.0);
-        let power_low = crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, -0.05, 1.0);
+        let power_high =
+            crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.05, 1.0);
+        let power_neutral =
+            crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.00, 1.0);
+        let power_low =
+            crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, -0.05, 1.0);
         let offense_delta_high = (power_high - power_neutral) / power_neutral;
         let offense_delta_low = (power_low - power_neutral) / power_neutral;
-        assert!((offense_delta_high - 0.05).abs() < 0.005, "High offense must produce ~+5% power delta: {:.3}%", offense_delta_high * 100.0);
-        assert!((offense_delta_low - (-0.05)).abs() < 0.005, "Low offense must produce ~-5% power delta: {:.3}%", offense_delta_low * 100.0);
+        assert!(
+            (offense_delta_high - 0.05).abs() < 0.005,
+            "High offense must produce ~+5% power delta: {:.3}%",
+            offense_delta_high * 100.0
+        );
+        assert!(
+            (offense_delta_low - (-0.05)).abs() < 0.005,
+            "Low offense must produce ~-5% power delta: {:.3}%",
+            offense_delta_low * 100.0
+        );
 
         // 2. Defense effect
-        let def_high = crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.05, 1.0);
-        let def_neutral = crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.00, 1.0);
+        let def_high =
+            crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.05, 1.0);
+        let def_neutral =
+            crate::combat::calculate_effective_combat_power(40_000.0, 1, 1.0, 1.0, 0.00, 1.0);
         let def_delta_high = (def_high - def_neutral) / def_neutral;
-        assert!((def_delta_high - 0.05).abs() < 0.005, "High defense must produce ~+5% power delta: {:.3}%", def_delta_high * 100.0);
+        assert!(
+            (def_delta_high - 0.05).abs() < 0.005,
+            "High defense must produce ~+5% power delta: {:.3}%",
+            def_delta_high * 100.0
+        );
 
         // 3. Expansion consolidation rate effect
         let mat_base = crate::balance::CONSOLIDATION_MATURATION_RATE as f64;
         let mat_high = mat_base * (1.0 + 0.05 * 1.5);
         let mat_low = mat_base * (1.0 - 0.05 * 1.5);
         let expansion_delta = (mat_high - mat_base) / mat_base;
-        assert!((expansion_delta - 0.075).abs() < 0.005, "Expansion doctrine must produce ~+7.5% maturation speed delta: {:.3}%", expansion_delta * 100.0);
+        assert!(
+            (expansion_delta - 0.075).abs() < 0.005,
+            "Expansion doctrine must produce ~+7.5% maturation speed delta: {:.3}%",
+            expansion_delta * 100.0
+        );
         assert!(mat_high > mat_low);
 
         // 4. Maritime effect
         let mar_base = 1.0_f64;
         let mar_high = mar_base * (1.0 + 0.05 * 1.5);
         let mar_delta = (mar_high - mar_base) / mar_base;
-        assert!((mar_delta - 0.075).abs() < 0.005, "Maritime doctrine must produce ~+7.5% maritime bonus delta: {:.3}%", mar_delta * 100.0);
+        assert!(
+            (mar_delta - 0.075).abs() < 0.005,
+            "Maritime doctrine must produce ~+7.5% maritime bonus delta: {:.3}%",
+            mar_delta * 100.0
+        );
     }
 }

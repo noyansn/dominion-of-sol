@@ -278,8 +278,22 @@ impl CombatManager {
         started_tick: u64,
         operation_kind: &str,
     ) -> u32 {
-        let (f_a, f_b) = if faction_a < faction_b { (faction_a, faction_b) } else { (faction_b, faction_a) };
-        let (final_nx, final_ny) = if faction_a == f_a { (normal_x, normal_y) } else { (-normal_x, -normal_y) };
+        // Neutral is not a combatant in an amphibious landing. Preserve the
+        // real attacker in faction_a and zero in faction_b so the simulation
+        // resolves one exact neutral coast instead of canonicalizing the pair
+        // into a fictitious "neutral attacks faction" front.
+        let (f_a, f_b) = if faction_b == 0 {
+            (faction_a, 0)
+        } else if faction_a < faction_b {
+            (faction_a, faction_b)
+        } else {
+            (faction_b, faction_a)
+        };
+        let (final_nx, final_ny) = if faction_a == f_a {
+            (normal_x, normal_y)
+        } else {
+            (-normal_x, -normal_y)
+        };
         let (deployed_a, deployed_b) = if faction_a == f_a {
             (deployed_attacker, deployed_defender)
         } else {
@@ -316,8 +330,16 @@ impl CombatManager {
             cohesion: 1.0,
             supply_efficiency: 1.0,
             front_status: "CONTESTED".to_string(),
-            border_cells_a: if faction_a == f_a { vec![source_cell_index] } else { vec![target_cell_index] },
-            border_cells_b: if faction_a == f_a { vec![target_cell_index] } else { vec![source_cell_index] },
+            border_cells_a: if faction_a == f_a {
+                vec![source_cell_index]
+            } else {
+                vec![target_cell_index]
+            },
+            border_cells_b: if faction_a == f_a {
+                vec![target_cell_index]
+            } else {
+                vec![source_cell_index]
+            },
         });
         id
     }

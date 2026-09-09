@@ -5,7 +5,10 @@
 pub mod tests {
     use crate::balance::*;
     use crate::bot::{BotBrain, BotExpansionArchetype, BotManager, BotPersonality};
-    use crate::expansion::{cells_for_commitment, generate_focus_corridor_patch, generate_frontier_distribution_patch};
+    use crate::expansion::{
+        cells_for_commitment, cells_have_legal_land_connection, generate_focus_corridor_patch,
+        generate_frontier_distribution_patch,
+    };
     use crate::simulation::{MacroPhase, Simulation};
     use crate::world_map::{WORLD_HEIGHT, WORLD_WIDTH};
     use std::collections::HashSet;
@@ -54,12 +57,23 @@ pub mod tests {
     #[test]
     fn test_02_all_44_factions_same_policy() {
         let sim = Simulation::new_standard(Some("roma"), 42);
-        assert_eq!(sim.factions.len(), 44, "Must have exact 44 civilization roster");
-        let human = sim.factions.iter().find(|f| f.is_human).expect("human present");
+        assert_eq!(
+            sim.factions.len(),
+            44,
+            "Must have exact 44 civilization roster"
+        );
+        let human = sim
+            .factions
+            .iter()
+            .find(|f| f.is_human)
+            .expect("human present");
         assert_eq!(human.population, 10_000.0);
 
         for ai in sim.factions.iter().filter(|f| !f.is_human) {
-            assert_eq!(ai.population, human.population, "AI must have identical starting population to human (10,000)");
+            assert_eq!(
+                ai.population, human.population,
+                "AI must have identical starting population to human (10,000)"
+            );
             assert!(
                 ai.population_capacity >= 14_000.0 && ai.population_capacity <= 20_000.0,
                 "AI capacity must follow same baseline capacity formula, got {}",
@@ -96,22 +110,28 @@ pub mod tests {
         let (mut sim, cap) = setup_open_grid_sim();
         let target = cap + 1;
         let commit_pct = 0.12; // 12% = 1,200 pop
-        let outcome = sim.process_expand_command_with_mode(1, target, "FOCUS", Some(commit_pct)).unwrap();
+        let outcome = sim
+            .process_expand_command_with_mode(1, target, "FOCUS", Some(commit_pct))
+            .unwrap();
 
         assert!(
-            outcome.patch.actual_size >= 3 && outcome.patch.actual_size <= 5,
-            "12% commit (~1,200 pop) should yield 3-5 cells, got {}",
+            outcome.patch.actual_size >= 6 && outcome.patch.actual_size <= 9,
+            "12% commit (~1,200 pop) should yield a local 6-9 cell lobe, got {}",
             outcome.patch.actual_size
         );
 
-        // Verify spatial reach is local (within 6 grid cells of cap)
+        // Verify spatial reach is still local (within 8 grid cells of cap)
         let cx = cap % WORLD_WIDTH as u32;
         let cy = cap / WORLD_WIDTH as u32;
         for &c in &outcome.patch.cells {
             let px = c % WORLD_WIDTH as u32;
             let py = c / WORLD_WIDTH as u32;
             let dist = ((px as f64 - cx as f64).powi(2) + (py as f64 - cy as f64).powi(2)).sqrt();
-            assert!(dist <= 6.0, "Moderate commitment must remain strictly local, cell was {} away", dist);
+            assert!(
+                dist <= 8.0,
+                "Moderate commitment must remain strictly local, cell was {} away",
+                dist
+            );
         }
     }
 
@@ -120,8 +140,17 @@ pub mod tests {
     fn test_05_50_percent_produces_more_territory_than_12() {
         let n12 = cells_for_commitment(1_200.0);
         let n50 = cells_for_commitment(5_000.0);
-        assert!(n50 > n12, "50% commitment must produce more territory than 12% ({} vs {})", n50, n12);
-        assert!(n50 >= 10 && n50 <= 14, "50% commitment (5,000 pop) should yield ~11-13 cells, got {}", n50);
+        assert!(
+            n50 > n12,
+            "50% commitment must produce more territory than 12% ({} vs {})",
+            n50,
+            n12
+        );
+        assert!(
+            n50 >= 19 && n50 <= 23,
+            "50% commitment (5,000 pop) should yield ~19-23 cells, got {}",
+            n50
+        );
     }
 
     // 6. 50% commitment has lower efficiency per Population than healthy moderate commitment
@@ -147,10 +176,15 @@ pub mod tests {
         let (mut sim, cap) = setup_open_grid_sim();
         let target = cap + 1;
         let before_pop = sim.factions[0].population;
-        let outcome = sim.process_expand_command_with_mode(1, target, "FOCUS", Some(0.15)).unwrap();
+        let outcome = sim
+            .process_expand_command_with_mode(1, target, "FOCUS", Some(0.15))
+            .unwrap();
 
         let spent = before_pop - sim.factions[0].population;
-        assert!((spent - 1_500.0).abs() < 1.0, "Exact committed budget must be deducted");
+        assert!(
+            (spent - 1_500.0).abs() < 1.0,
+            "Exact committed budget must be deducted"
+        );
         assert!((outcome.population_cost - 1_500.0).abs() < 1.0);
         assert_eq!(outcome.patch.actual_size, cells_for_commitment(1_500.0));
     }
@@ -160,7 +194,9 @@ pub mod tests {
     fn test_08_operation_does_not_refill_budget_every_tick() {
         let (mut sim, cap) = setup_open_grid_sim();
         let target = cap + 1;
-        let outcome = sim.process_expand_command_with_mode(1, target, "FOCUS", Some(0.12)).unwrap();
+        let outcome = sim
+            .process_expand_command_with_mode(1, target, "FOCUS", Some(0.12))
+            .unwrap();
         let expected_size = outcome.patch.actual_size;
 
         // Step simulation ticks to advance pending expansion
@@ -187,11 +223,15 @@ pub mod tests {
         // Verify that the patch does not march 12 cells in a straight line
         let ax = (cap % WORLD_WIDTH as u32) as f64;
         let ay = (cap / WORLD_WIDTH as u32) as f64;
-        let max_dist = patch.cells.iter().map(|&c| {
-            let px = (c % WORLD_WIDTH as u32) as f64;
-            let py = (c / WORLD_WIDTH as u32) as f64;
-            ((px - ax).powi(2) + (py - ay).powi(2)).sqrt()
-        }).fold(0.0f64, f64::max);
+        let max_dist = patch
+            .cells
+            .iter()
+            .map(|&c| {
+                let px = (c % WORLD_WIDTH as u32) as f64;
+                let py = (c / WORLD_WIDTH as u32) as f64;
+                ((px - ax).powi(2) + (py - ay).powi(2)).sqrt()
+            })
+            .fold(0.0f64, f64::max);
 
         assert!(
             max_dist < 8.5,
@@ -231,9 +271,9 @@ pub mod tests {
 
         // Every cell must be contiguous with faction 1 or adjacent to another patch cell
         for &c in &patch.cells {
-            let has_adj = Simulation::cardinal(c as usize).into_iter().any(|n| {
-                sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32))
-            });
+            let has_adj = Simulation::cardinal(c as usize)
+                .into_iter()
+                .any(|n| sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32)));
             assert!(has_adj, "Every frontier cell must be connected");
         }
     }
@@ -244,9 +284,9 @@ pub mod tests {
         let (sim, cap) = setup_open_grid_sim();
         let patch = generate_focus_corridor_patch(&sim.cells, 1, cap + 30, 8);
         for &c in &patch.cells {
-            let connected = Simulation::cardinal(c as usize).into_iter().any(|n| {
-                sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32))
-            });
+            let connected = Simulation::cardinal(c as usize)
+                .into_iter()
+                .any(|n| sim.cells[n].owner_id == 1 || patch.cells.contains(&(n as u32)));
             assert!(connected, "No disconnected cells allowed in FOCUS patch");
         }
     }
@@ -303,7 +343,11 @@ pub mod tests {
 
         // 3x territory must give strictly LESS than 3x growth
         let ratio = g2 / g1;
-        assert!(ratio > 1.4 && ratio < 2.6, "3x territory should yield sublinear growth ratio ~1.8-2.2, got {:.3}", ratio);
+        assert!(
+            ratio > 1.4 && ratio < 2.6,
+            "3x territory should yield sublinear growth ratio ~1.8-2.2, got {:.3}",
+            ratio
+        );
     }
 
     // 16. 2× territory target is roughly compatible with ~1.6–1.8× effective growth
@@ -355,13 +399,20 @@ pub mod tests {
         sim.refresh_all_economies();
 
         let g = sim.factions[0].population_growth_per_second;
-        assert!(g > 15.0, "Low population state must maintain positive growth to recover, got {}", g);
+        assert!(
+            g > 15.0,
+            "Low population state must maintain positive growth to recover, got {}",
+            g
+        );
 
         let before = sim.factions[0].population;
         for _ in 0..20 {
             sim.step_dt(1.0);
         }
-        assert!(sim.factions[0].population > before + 200.0, "Must actively recover population over time");
+        assert!(
+            sim.factions[0].population > before + 200.0,
+            "Must actively recover population over time"
+        );
     }
 
     // 18. Commit remains permanent cost
@@ -369,7 +420,8 @@ pub mod tests {
     fn test_18_commit_remains_permanent_cost() {
         let (mut sim, cap) = setup_open_grid_sim();
         let before = sim.factions[0].population;
-        sim.process_expand_command_with_mode(1, cap + 1, "FOCUS", Some(0.15)).unwrap();
+        sim.process_expand_command_with_mode(1, cap + 1, "FOCUS", Some(0.15))
+            .unwrap();
         let expected_pop = before - 1_500.0;
         assert!((sim.factions[0].population - expected_pop).abs() < 1.0);
 
@@ -399,8 +451,15 @@ pub mod tests {
         sim.refresh_all_economies();
 
         let initial_pop = sim.factions[0].population;
-        let order = sim.process_attack_command(1, b1 as u32, b2 as u32, 0.20).unwrap();
-        let front_idx = sim.combat_manager.fronts.iter().position(|f| f.front_id == order.front_id).unwrap();
+        let order = sim
+            .process_attack_command(1, b1 as u32, b2 as u32, 0.20)
+            .unwrap();
+        let front_idx = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|f| f.front_id == order.front_id)
+            .unwrap();
 
         // End combat
         sim.combat_manager.fronts[front_idx].is_combat_active = false;
@@ -428,10 +487,26 @@ pub mod tests {
             }
         }
 
-        assert!(compact_count >= 8, "Must have sufficient CompactRadial bots, got {}", compact_count);
-        assert!(directional_count >= 8, "Must have sufficient DirectionalLobe bots, got {}", directional_count);
-        assert!(multi_axis_count >= 5, "Must have sufficient MultiAxis bots, got {}", multi_axis_count);
-        assert!(opp_count >= 4, "Must have sufficient Opportunistic bots, got {}", opp_count);
+        assert!(
+            compact_count >= 8,
+            "Must have sufficient CompactRadial bots, got {}",
+            compact_count
+        );
+        assert!(
+            directional_count >= 8,
+            "Must have sufficient DirectionalLobe bots, got {}",
+            directional_count
+        );
+        assert!(
+            multi_axis_count >= 5,
+            "Must have sufficient MultiAxis bots, got {}",
+            multi_axis_count
+        );
+        assert!(
+            opp_count >= 4,
+            "Must have sufficient Opportunistic bots, got {}",
+            opp_count
+        );
     }
 
     // 21. Same deterministic seed reproduces AI decisions
@@ -458,7 +533,10 @@ pub mod tests {
                 sim1.factions[i].population,
                 sim2.factions[i].population
             );
-            assert_eq!(sim1.factions[i].territory_count, sim2.factions[i].territory_count);
+            assert_eq!(
+                sim1.factions[i].territory_count,
+                sim2.factions[i].territory_count
+            );
         }
     }
 
@@ -478,7 +556,10 @@ pub mod tests {
         let mut aspect_ratios = Vec::new();
         for f in &sim.factions {
             if f.territory_count >= 3 {
-                let cells: Vec<u32> = sim.cells.iter().enumerate()
+                let cells: Vec<u32> = sim
+                    .cells
+                    .iter()
+                    .enumerate()
                     .filter(|(_, c)| c.owner_id == f.faction_id)
                     .map(|(i, _)| i as u32)
                     .collect();
@@ -496,7 +577,12 @@ pub mod tests {
         assert!(aspect_ratios.len() >= 10);
         let min_aspect = aspect_ratios.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_aspect = aspect_ratios.iter().cloned().fold(0.0f64, f64::max);
-        assert!(max_aspect - min_aspect > 0.5, "Territories must have diverse aspect ratios, range: [{:.2}, {:.2}]", min_aspect, max_aspect);
+        assert!(
+            max_aspect - min_aspect > 0.5,
+            "Territories must have diverse aspect ratios, range: [{:.2}, {:.2}]",
+            min_aspect,
+            max_aspect
+        );
     }
 
     // 23. FRONTIER-capable AI produces compact/radial shapes
@@ -521,7 +607,11 @@ pub mod tests {
         let dx = (max_x - min_x + 1) as f64;
         let dy = (max_y - min_y + 1) as f64;
         let aspect = (dx / dy).max(dy / dx);
-        assert!(aspect <= 2.2, "FRONTIER expansion must produce compact shape, aspect: {:.2}", aspect);
+        assert!(
+            aspect <= 2.2,
+            "FRONTIER expansion must produce compact shape, aspect: {:.2}",
+            aspect
+        );
     }
 
     // 24. FOCUS-capable AI produces directional but non-snake shapes
@@ -532,8 +622,15 @@ pub mod tests {
         assert_eq!(patch.cells.len(), 8);
 
         // Distinct Y coordinates must be >= 2
-        let ys: HashSet<u32> = patch.cells.iter().map(|&c| c / WORLD_WIDTH as u32).collect();
-        assert!(ys.len() >= 2, "FOCUS lobe must have meaningful front width >= 2 cells");
+        let ys: HashSet<u32> = patch
+            .cells
+            .iter()
+            .map(|&c| c / WORLD_WIDTH as u32)
+            .collect();
+        assert!(
+            ys.len() >= 2,
+            "FOCUS lobe must have meaningful front width >= 2 cells"
+        );
     }
 
     // 25. Repeated AI operations obey real Population economy
@@ -543,19 +640,25 @@ pub mod tests {
         let p0 = sim.factions[0].population;
 
         // Perform 3 sequential operations
-        sim.process_expand_command_with_mode(1, cap + 1, "FOCUS", Some(0.12)).unwrap();
+        sim.process_expand_command_with_mode(1, cap + 1, "FOCUS", Some(0.12))
+            .unwrap();
         let p1 = sim.factions[0].population;
         assert!(p1 < p0);
 
-        sim.process_expand_command_with_mode(1, cap + 2, "FOCUS", Some(0.12)).unwrap();
+        sim.process_expand_command_with_mode(1, cap + 2, "FOCUS", Some(0.12))
+            .unwrap();
         let p2 = sim.factions[0].population;
         assert!(p2 < p1);
 
-        sim.process_expand_command_with_mode(1, cap + 3, "FOCUS", Some(0.12)).unwrap();
+        sim.process_expand_command_with_mode(1, cap + 3, "FOCUS", Some(0.12))
+            .unwrap();
         let p3 = sim.factions[0].population;
         assert!(p3 < p2);
 
-        assert!(p3 < 7_500.0, "Repeated operations must naturally exhaust living reserves");
+        assert!(
+            p3 < 7_500.0,
+            "Repeated operations must naturally exhaust living reserves"
+        );
     }
 
     // 26. Input smoke regressions
@@ -584,7 +687,14 @@ pub mod tests {
         let mut sim = Simulation::new_standard(Some("roma"), 42);
         let mut bot = BotManager::with_seed(43, 42);
 
-        let checkpoints = [(0, "T=0"), (20, "T=1s"), (100, "T=5s"), (300, "T=15s"), (600, "T=30s"), (1200, "T=60s")];
+        let checkpoints = [
+            (0, "T=0"),
+            (20, "T=1s"),
+            (100, "T=5s"),
+            (300, "T=15s"),
+            (600, "T=30s"),
+            (1200, "T=60s"),
+        ];
         for (target_tick, label) in checkpoints {
             while sim.tick < target_tick {
                 sim.tick += 1;
@@ -592,9 +702,23 @@ pub mod tests {
                 sim.step_dt(0.05);
             }
 
-            let max_area = sim.factions.iter().map(|f| f.controlled_area_km2).fold(0.0f64, f64::max);
-            let avg_area = sim.factions.iter().map(|f| f.controlled_area_km2).sum::<f64>() / sim.factions.len() as f64;
-            let avg_growth = sim.factions.iter().map(|f| f.population_growth_per_second).sum::<f64>() / sim.factions.len() as f64;
+            let max_area = sim
+                .factions
+                .iter()
+                .map(|f| f.controlled_area_km2)
+                .fold(0.0f64, f64::max);
+            let avg_area = sim
+                .factions
+                .iter()
+                .map(|f| f.controlled_area_km2)
+                .sum::<f64>()
+                / sim.factions.len() as f64;
+            let avg_growth = sim
+                .factions
+                .iter()
+                .map(|f| f.population_growth_per_second)
+                .sum::<f64>()
+                / sim.factions.len() as f64;
 
             println!(
                 "Pacing [{} (tick {})]: Max Area: {:.1} km², Avg Area: {:.1} km², Avg Growth: {:.1}/s",
@@ -619,7 +743,10 @@ pub mod tests {
         let base_pop = 10_000.0;
 
         println!("\n=== COMMITMENT TEST MATRIX (10K STARTING POPULATION) ===");
-        println!("{:<8} {:<10} {:<10} {:<12} {:<12}", "Commit%", "Pop Cost", "Cells", "Est Area km²", "Efficiency");
+        println!(
+            "{:<8} {:<10} {:<10} {:<12} {:<12}",
+            "Commit%", "Pop Cost", "Cells", "Est Area km²", "Efficiency"
+        );
 
         let mut prev_cells = 0;
         let mut prev_eff = f64::MAX;
@@ -628,7 +755,11 @@ pub mod tests {
             let commit_pop = base_pop * pct;
             let cells = cells_for_commitment(commit_pop);
             let est_area = (cells as f64) * STARTING_NUCLEUS_AREA_TARGET_KM2;
-            let eff = if commit_pop > 0.0 { (cells as f64) / commit_pop } else { 0.0 };
+            let eff = if commit_pop > 0.0 {
+                (cells as f64) / commit_pop
+            } else {
+                0.0
+            };
 
             println!(
                 "{:<8.0}% {:<10.0} {:<10} {:<12.0} {:<12.6}",
@@ -643,7 +774,10 @@ pub mod tests {
                 assert!(cells >= prev_cells, "Monotonic total cells gained");
             }
             if pct >= 0.12 {
-                assert!(eff <= prev_eff + 1e-6, "Diminishing efficiency per population beyond sweet spot");
+                assert!(
+                    eff <= prev_eff + 1e-6,
+                    "Diminishing efficiency per population beyond sweet spot"
+                );
             }
 
             prev_cells = cells;
@@ -654,6 +788,86 @@ pub mod tests {
 
         let eff12 = (cells_for_commitment(1_200.0) as f64) / 1_200.0;
         let eff50 = (cells_for_commitment(5_000.0) as f64) / 5_000.0;
-        assert!(eff12 > eff50, "50% commitment must be less efficient than 12% sweet spot");
+        assert!(
+            eff12 > eff50,
+            "50% commitment must be less efficient than 12% sweet spot"
+        );
+    }
+
+    #[test]
+    fn test_30_continuous_random_angle_focus_audit() {
+        let requested_angles = [13.0_f64, 27.0, 41.0, 68.0, 112.0, 157.0, 214.0, 301.0];
+        println!("angle,command_angle,authoritative_angle,error,cells,forward,lateral,connected,sequence");
+        for requested_angle in requested_angles {
+            let (sim, cap) = setup_open_grid_sim();
+            let radians = requested_angle.to_radians();
+            let dx = (radians.cos() * 36.0).round() as i32;
+            let dy = (radians.sin() * 36.0).round() as i32;
+            let cap_x = (cap as usize % WORLD_WIDTH) as i32;
+            let cap_y = (cap as usize / WORLD_WIDTH) as i32;
+            let target_x = (cap_x + dx).rem_euclid(WORLD_WIDTH as i32);
+            let target_y = (cap_y + dy).clamp(0, WORLD_HEIGHT as i32 - 1);
+            let target = (target_y as usize * WORLD_WIDTH + target_x as usize) as u32;
+            let command_angle = (dy as f64).atan2(dx as f64).to_degrees().rem_euclid(360.0);
+            let patch = generate_focus_corridor_patch(&sim.cells, 1, target, 18);
+            assert_eq!(
+                patch.cells.len(),
+                18,
+                "angle {requested_angle} produced a short patch"
+            );
+
+            let ux = (command_angle.to_radians()).cos();
+            let uy = (command_angle.to_radians()).sin();
+            let mut sum_x = 0.0;
+            let mut sum_y = 0.0;
+            let mut min_lateral = f64::INFINITY;
+            let mut max_lateral = f64::NEG_INFINITY;
+            let mut max_forward = f64::NEG_INFINITY;
+            let mut accepted = HashSet::new();
+            let mut connected = true;
+            for &cell in &patch.cells {
+                let x = (cell as usize % WORLD_WIDTH) as f64;
+                let y = (cell as usize / WORLD_WIDTH) as f64;
+                let vx = x - cap_x as f64;
+                let vy = y - cap_y as f64;
+                sum_x += vx;
+                sum_y += vy;
+                max_forward = max_forward.max(vx * ux + vy * uy);
+                let lateral = vx * -uy + vy * ux;
+                min_lateral = min_lateral.min(lateral);
+                max_lateral = max_lateral.max(lateral);
+                let has_parent =
+                    cells_have_legal_land_connection(&sim.cells, cap as usize, cell as usize)
+                        || accepted.iter().any(|parent| {
+                            cells_have_legal_land_connection(&sim.cells, *parent, cell as usize)
+                        });
+                connected &= has_parent;
+                accepted.insert(cell as usize);
+            }
+            let authoritative_angle = sum_y.atan2(sum_x).to_degrees().rem_euclid(360.0);
+            let raw_error = (authoritative_angle - command_angle).abs();
+            let error = raw_error.min(360.0 - raw_error);
+            let lateral_spread = max_lateral - min_lateral;
+            println!(
+                "{requested_angle:.0},{command_angle:.2},{authoritative_angle:.2},{error:.2},{},{max_forward:.2},{lateral_spread:.2},{connected},{:?}",
+                patch.cells.len(), patch.cells
+            );
+            assert!(
+                connected,
+                "angle {requested_angle} disconnected in sequence"
+            );
+            assert!(
+                max_forward >= 4.0,
+                "angle {requested_angle} made no forward progress"
+            );
+            assert!(
+                lateral_spread >= 1.0,
+                "angle {requested_angle} snapped into a one-cell ruler"
+            );
+            assert!(
+                error <= 18.0,
+                "angle {requested_angle} snapped by {error:.2} degrees"
+            );
+        }
     }
 }

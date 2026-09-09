@@ -2,6 +2,9 @@ import { terrainLodManager } from '../render/TerrainLodManager';
 import { getFramePerfSnapshot, resetFramePerf } from './FramePerf';
 import { getRenderProfileSnapshot } from './RenderProfile';
 import { gameState } from '../game/GameState';
+import { getPoliticalPresentationProfile, resetPoliticalPresentationProfile, type PresentationProfileBucket } from '../render/PoliticalTransitionManager';
+import { getPoliticalUploadMetrics, resetPoliticalUploadMetrics, type PoliticalUploadMetrics } from '../render/PoliticalTextureUpload';
+import { getPoliticalBorderMetrics, resetPoliticalBorderMetrics, type PoliticalBorderMetrics } from '../render/PoliticalBorderRenderer';
 
 export interface DominionBenchmarkResult {
   durationMs: number;
@@ -33,7 +36,25 @@ export interface DominionBenchmarkResult {
   cameraPosition: { x: number; y: number };
   visibleWorldFraction: number;
   politicalDirtyPixelsPerFrame: number;
-  systemTimings: ReturnType<typeof getFramePerfSnapshot>['systems'];
+  systemTimings: Record<string, {
+    count: number;
+    totalMs: number;
+    avgMs: number;
+    p95Ms: number;
+    p99Ms: number;
+    maxMs: number;
+    callsPerFrame: number;
+  }>;
+  presentationProfile: Record<string, PresentationProfileBucket>;
+  politicalUploadMetrics: PoliticalUploadMetrics;
+  politicalBorderMetrics: PoliticalBorderMetrics;
+  lodMetrics: {
+    residentTextureBytes: number;
+    cachedTextureCount: number;
+    tileLoadCount: number;
+    tileCacheHitCount: number;
+    tileEvictionCount: number;
+  };
   gpu: { webglVersion: string; vendor: string; renderer: string };
 }
 
@@ -155,6 +176,12 @@ export function installDominionBenchmark(): void {
           if (sampleStartedAt === null && elapsed >= warmupMs) {
             sampleStartedAt = now;
             resetFramePerf();
+            resetPoliticalPresentationProfile();
+            resetPoliticalUploadMetrics();
+            resetPoliticalBorderMetrics();
+            terrainLodManager.tileLoadCount = 0;
+            terrainLodManager.tileCacheHitCount = 0;
+            terrainLodManager.tileEvictionCount = 0;
           } else if (sampleStartedAt !== null) {
             frameTimes.push(frameMs);
             if (document.visibilityState !== 'visible') hiddenFrames++;
@@ -174,6 +201,7 @@ export function installDominionBenchmark(): void {
           const totalFrameMs = frameTimes.reduce((sum, value) => sum + value, 0);
           const renderer = (window as any).__DOMINION_RENDERER__;
           const perf = getFramePerfSnapshot();
+          const presentationProfile = getPoliticalPresentationProfile();
           const profile = getRenderProfileSnapshot();
           const camera = renderer?.worldContainer;
           const scale = camera?.scale?.x || 1;
@@ -223,8 +251,22 @@ export function installDominionBenchmark(): void {
             systemTimings: Object.fromEntries(Object.entries(perf.systems).map(([name, timing]) => [name, {
               count: timing.count,
               totalMs: round(timing.totalMs),
+              avgMs: round(timing.avgMs ?? 0),
+              p95Ms: round(timing.p95Ms ?? 0),
+              p99Ms: round(timing.p99Ms ?? 0),
               maxMs: round(timing.maxMs),
+              callsPerFrame: round(timing.count / Math.max(1, frameTimes.length)),
             }])),
+            presentationProfile,
+            politicalUploadMetrics: getPoliticalUploadMetrics(),
+            politicalBorderMetrics: getPoliticalBorderMetrics(),
+            lodMetrics: {
+              residentTextureBytes: terrainLodManager.residentTextureBytes,
+              cachedTextureCount: terrainLodManager.cachedTextureCount,
+              tileLoadCount: terrainLodManager.tileLoadCount,
+              tileCacheHitCount: terrainLodManager.tileCacheHitCount,
+              tileEvictionCount: terrainLodManager.tileEvictionCount,
+            },
             gpu: gpuInfo(renderer?.app?.renderer),
           };
 

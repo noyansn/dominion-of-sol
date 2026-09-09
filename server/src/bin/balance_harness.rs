@@ -36,7 +36,7 @@ pub mod world_map;
 pub mod world_topology;
 
 use bot::BotManager;
-use civilizations::{CANONICAL_CIVILIZATIONS, MacroRegion};
+use civilizations::{MacroRegion, CANONICAL_CIVILIZATIONS};
 use simulation::Simulation;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -48,6 +48,12 @@ use std::time::Instant;
 pub struct IntervalSnapshot {
     pub minute: usize,
     pub survivors: usize,
+    /// Neutral percentage across all authoritative land, including
+    /// intentionally non-playable polar land and unsupported fragments.
+    pub raw_neutral_land_pct: f64,
+    /// Neutral percentage in the actual match-completion land mask. This is
+    /// the pacing metric; raw geography is reported beside it, never folded
+    /// into a false "unexpanded" diagnosis.
     pub neutral_land_pct: f64,
     pub largest_territory_share: f64,
     pub top3_territory_share: f64,
@@ -179,7 +185,8 @@ fn run_single_complete_match(
     is_snapshot_mode: bool,
 ) -> CompleteMatchRecord {
     let start_wall = Instant::now();
-    let focal_civ = CANONICAL_CIVILIZATIONS[(match_index.saturating_sub(1)) % CANONICAL_CIVILIZATIONS.len()].id;
+    let focal_civ =
+        CANONICAL_CIVILIZATIONS[(match_index.saturating_sub(1)) % CANONICAL_CIVILIZATIONS.len()].id;
     let mut sim = Simulation::new_standard(Some(focal_civ), seed);
 
     // Record initial capitals to track relocation vs original
@@ -264,7 +271,11 @@ fn run_single_complete_match(
         }
 
         // Interval Snapshots at 5, 10, 15, 20 min (6000, 12000, 18000, 24000 ticks)
-        if current_tick == 6000 || current_tick == 12000 || current_tick == 18000 || current_tick == 24000 {
+        if current_tick == 6000
+            || current_tick == 12000
+            || current_tick == 18000
+            || current_tick == 24000
+        {
             let minute = (current_tick as f64 * 0.05 / 60.0).round() as usize;
             let mut alive_factions: Vec<_> = sim
                 .factions
@@ -274,8 +285,21 @@ fn run_single_complete_match(
             alive_factions.sort_by_key(|f| std::cmp::Reverse(f.territory_count));
             let survivors = alive_factions.len();
             let total_inhabited: u32 = alive_factions.iter().map(|f| f.territory_count).sum();
-            let neutral_cells = sim.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count();
-            let neutral_land_pct = (neutral_cells as f64 / sim.total_land_cells.max(1) as f64) * 100.0;
+            let raw_neutral_cells = sim
+                .cells
+                .iter()
+                .filter(|c| c.terrain_type == 0 && c.owner_id == 0)
+                .count();
+            let raw_neutral_land_pct =
+                (raw_neutral_cells as f64 / sim.total_land_cells.max(1) as f64) * 100.0;
+            let playable_neutral_cells = sim
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(index, cell)| sim.playable_land_mask[*index] == 1 && cell.owner_id == 0)
+                .count();
+            let neutral_land_pct =
+                (playable_neutral_cells as f64 / sim.playable_land_cells.max(1) as f64) * 100.0;
             let largest_territory_share = if let Some(top) = alive_factions.first() {
                 if total_inhabited > 0 {
                     (top.territory_count as f64 / total_inhabited as f64) * 100.0
@@ -285,7 +309,11 @@ fn run_single_complete_match(
             } else {
                 0.0
             };
-            let top3_territory: u32 = alive_factions.iter().take(3).map(|f| f.territory_count).sum();
+            let top3_territory: u32 = alive_factions
+                .iter()
+                .take(3)
+                .map(|f| f.territory_count)
+                .sum();
             let top3_territory_share = if total_inhabited > 0 {
                 (top3_territory as f64 / total_inhabited as f64) * 100.0
             } else {
@@ -304,8 +332,16 @@ fn run_single_complete_match(
                     }
                 }
             }
-            let avg_consolidation = if owned_count > 0 { consol_sum / owned_count as f64 } else { 0.0 };
-            let avg_supply = if owned_count > 0 { (supplied_count as f64 / owned_count as f64) * 100.0 } else { 100.0 };
+            let avg_consolidation = if owned_count > 0 {
+                consol_sum / owned_count as f64
+            } else {
+                0.0
+            };
+            let avg_supply = if owned_count > 0 {
+                (supplied_count as f64 / owned_count as f64) * 100.0
+            } else {
+                100.0
+            };
 
             let active_fronts: Vec<_> = sim
                 .combat_manager
@@ -314,7 +350,11 @@ fn run_single_complete_match(
                 .filter(|fr| fr.is_combat_active && fr.operation_kind != "CONTACT")
                 .collect();
             let avg_cohesion = if !active_fronts.is_empty() {
-                active_fronts.iter().map(|fr| fr.cohesion as f64).sum::<f64>() / active_fronts.len() as f64
+                active_fronts
+                    .iter()
+                    .map(|fr| fr.cohesion as f64)
+                    .sum::<f64>()
+                    / active_fronts.len() as f64
             } else {
                 1.0
             };
@@ -333,6 +373,7 @@ fn run_single_complete_match(
             snapshots.push(IntervalSnapshot {
                 minute,
                 survivors,
+                raw_neutral_land_pct,
                 neutral_land_pct,
                 largest_territory_share,
                 top3_territory_share,
@@ -368,7 +409,11 @@ fn run_single_complete_match(
     let leader = surviving_factions.first().copied();
     let (leader_at_checkpoint, leader_territory, leader_territory_pct, leader_population) =
         if let Some(l) = leader {
-            let civ_slug = l.flag_id.strip_prefix("flag_").unwrap_or(&l.flag_id).to_string();
+            let civ_slug = l
+                .flag_id
+                .strip_prefix("flag_")
+                .unwrap_or(&l.flag_id)
+                .to_string();
             let pct = if total_inhabited > 0 {
                 (l.territory_count as f64 / total_inhabited as f64) * 100.0
             } else {
@@ -380,41 +425,101 @@ fn run_single_complete_match(
         };
 
     // Authoritative winner determination
-    let (match_completed, winner_civ, winner_faction, winner_territory, winner_territory_pct, winner_population, end_reason) =
-        if !is_snapshot_mode && sim.match_over && sim.winner_faction_id.is_some() {
-            let wid = sim.winner_faction_id.unwrap();
-            let fac = sim.factions.iter().find(|f| f.faction_id == wid);
-            let reason = if final_surviving_civs <= 1 {
-                "LAST_SURVIVOR".to_string()
-            } else {
-                "DOMINATION_LAND".to_string()
-            };
-            if let Some(w) = fac {
-                let civ_slug = w.flag_id.strip_prefix("flag_").unwrap_or(&w.flag_id).to_string();
-                let pct = if total_inhabited > 0 {
-                    (w.territory_count as f64 / total_inhabited as f64) * 100.0
-                } else {
-                    0.0
-                };
-                (true, civ_slug, w.faction_id, w.territory_count, pct, w.population, reason)
-            } else {
-                (false, "NONE".to_string(), 0, 0, 0.0, 0.0, "UNKNOWN_WINNER".to_string())
-            }
-        } else if is_snapshot_mode {
-            (false, "NONE".to_string(), 0, 0, 0.0, 0.0, "SNAPSHOT_CHECKPOINT".to_string())
+    let (
+        match_completed,
+        winner_civ,
+        winner_faction,
+        winner_territory,
+        winner_territory_pct,
+        winner_population,
+        end_reason,
+    ) = if !is_snapshot_mode && sim.match_over && sim.winner_faction_id.is_some() {
+        let wid = sim.winner_faction_id.unwrap();
+        let fac = sim.factions.iter().find(|f| f.faction_id == wid);
+        let reason = if final_surviving_civs <= 1 {
+            "LAST_SURVIVOR".to_string()
         } else {
-            (false, "NONE".to_string(), 0, 0, 0.0, 0.0, "SAFETY_TIMEOUT".to_string())
+            "DOMINATION_LAND".to_string()
         };
+        if let Some(w) = fac {
+            let civ_slug = w
+                .flag_id
+                .strip_prefix("flag_")
+                .unwrap_or(&w.flag_id)
+                .to_string();
+            let pct = if total_inhabited > 0 {
+                (w.territory_count as f64 / total_inhabited as f64) * 100.0
+            } else {
+                0.0
+            };
+            (
+                true,
+                civ_slug,
+                w.faction_id,
+                w.territory_count,
+                pct,
+                w.population,
+                reason,
+            )
+        } else {
+            (
+                false,
+                "NONE".to_string(),
+                0,
+                0,
+                0.0,
+                0.0,
+                "UNKNOWN_WINNER".to_string(),
+            )
+        }
+    } else if is_snapshot_mode {
+        (
+            false,
+            "NONE".to_string(),
+            0,
+            0,
+            0.0,
+            0.0,
+            "SNAPSHOT_CHECKPOINT".to_string(),
+        )
+    } else {
+        (
+            false,
+            "NONE".to_string(),
+            0,
+            0,
+            0.0,
+            0.0,
+            "SAFETY_TIMEOUT".to_string(),
+        )
+    };
 
     let runner_up = surviving_factions
         .get(1)
-        .map(|f| f.flag_id.strip_prefix("flag_").unwrap_or(&f.flag_id).to_string())
+        .map(|f| {
+            f.flag_id
+                .strip_prefix("flag_")
+                .unwrap_or(&f.flag_id)
+                .to_string()
+        })
         .unwrap_or_else(|| "none".to_string());
 
-    let first_contact_time = sim.first_contact_tick.map(|t| t as f64 * 0.05 / 60.0).unwrap_or(0.0);
-    let first_war_time = sim.first_war_tick.map(|t| t as f64 * 0.05 / 60.0).unwrap_or(0.0);
-    let first_elimination_time = sim.first_elimination_tick.map(|t| t as f64 * 0.05 / 60.0).unwrap_or(0.0);
-    let half_field_time = sim.half_field_tick.map(|t| t as f64 * 0.05 / 60.0).unwrap_or(0.0);
+    let first_contact_time = sim
+        .first_contact_tick
+        .map(|t| t as f64 * 0.05 / 60.0)
+        .unwrap_or(0.0);
+    let first_war_time = sim
+        .first_war_tick
+        .map(|t| t as f64 * 0.05 / 60.0)
+        .unwrap_or(0.0);
+    let first_elimination_time = sim
+        .first_elimination_tick
+        .map(|t| t as f64 * 0.05 / 60.0)
+        .unwrap_or(0.0);
+    let half_field_time = sim
+        .half_field_tick
+        .map(|t| t as f64 * 0.05 / 60.0)
+        .unwrap_or(0.0);
 
     let total_casualties: f64 = sim
         .combat_manager
@@ -431,11 +536,15 @@ fn run_single_complete_match(
     };
 
     let premium_bot_reactions = bot_manager.bot_premium_reaction_count as usize;
-    let free_bot_reactions = (bot_manager.bot_reaction_count as usize).saturating_sub(premium_bot_reactions);
+    let free_bot_reactions =
+        (bot_manager.bot_reaction_count as usize).saturating_sub(premium_bot_reactions);
 
     // Operation calculations
     let operations_started = op_trackers.len();
-    let operations_ended = op_trackers.values().filter(|op| op.ended_tick.is_some()).count();
+    let operations_ended = op_trackers
+        .values()
+        .filter(|op| op.ended_tick.is_some())
+        .count();
     let operations_ended_attacker_gain = op_trackers
         .values()
         .filter(|op| op.ended_tick.is_some() && op.captured_cells > 0)
@@ -446,7 +555,10 @@ fn run_single_complete_match(
         .count();
     let operations_stalled = op_trackers.values().filter(|op| op.ever_stalled).count();
     let operations_retreating = op_trackers.values().filter(|op| op.ever_retreating).count();
-    let operations_breakthrough = op_trackers.values().filter(|op| op.ever_breakthrough).count();
+    let operations_breakthrough = op_trackers
+        .values()
+        .filter(|op| op.ever_breakthrough)
+        .count();
     let operations_attacker_eliminated = op_trackers
         .values()
         .filter(|op| op.termination_reason == "ATTACKER_ELIMINATED")
@@ -458,7 +570,10 @@ fn run_single_complete_match(
 
     let mut op_durations: Vec<f64> = op_trackers
         .values()
-        .filter_map(|op| op.ended_tick.map(|end| (end.saturating_sub(op.started_tick)) as f64 * 0.05))
+        .filter_map(|op| {
+            op.ended_tick
+                .map(|end| (end.saturating_sub(op.started_tick)) as f64 * 0.05)
+        })
         .collect();
     op_durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let avg_operation_duration_sec = if !op_durations.is_empty() {
@@ -472,7 +587,10 @@ fn run_single_complete_match(
         0.0
     };
 
-    let mut committed_pops: Vec<f64> = op_trackers.values().map(|op| op.initial_committed).collect();
+    let mut committed_pops: Vec<f64> = op_trackers
+        .values()
+        .map(|op| op.initial_committed)
+        .collect();
     committed_pops.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let avg_committed_pop = if !committed_pops.is_empty() {
         committed_pops.iter().sum::<f64>() / committed_pops.len() as f64
@@ -497,7 +615,8 @@ fn run_single_complete_match(
     };
 
     let territory_cells_changed = sim.territory_turnover;
-    let territory_turnover_pct = (territory_cells_changed as f64 / sim.total_land_cells.max(1) as f64) * 100.0;
+    let territory_turnover_pct =
+        (territory_cells_changed as f64 / sim.total_land_cells.max(1) as f64) * 100.0;
 
     let mut captured_list: Vec<u32> = op_trackers.values().map(|op| op.captured_cells).collect();
     captured_list.sort_unstable();
@@ -538,7 +657,11 @@ fn run_single_complete_match(
             cells_20_plus += 1;
         }
 
-        let civ_slug = f.flag_id.strip_prefix("flag_").unwrap_or(&f.flag_id).to_string();
+        let civ_slug = f
+            .flag_id
+            .strip_prefix("flag_")
+            .unwrap_or(&f.flag_id)
+            .to_string();
         let share = if total_inhabited > 0 {
             (cells as f64 / total_inhabited as f64) * 100.0
         } else {
@@ -576,9 +699,21 @@ fn run_single_complete_match(
     };
 
     // AI decisions
-    let ai_pauses: u32 = bot_manager.brains.values().map(|b| b.consecutive_pauses).sum();
-    let ai_expansion_orders: u32 = bot_manager.brains.values().map(|b| b.consecutive_expansion_orders).sum();
-    let neutral_land_cells_20min = sim.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count();
+    let ai_pauses: u32 = bot_manager
+        .brains
+        .values()
+        .map(|b| b.consecutive_pauses)
+        .sum();
+    let ai_expansion_orders: u32 = bot_manager
+        .brains
+        .values()
+        .map(|b| b.consecutive_expansion_orders)
+        .sum();
+    let neutral_land_cells_20min = sim
+        .cells
+        .iter()
+        .filter(|c| c.terrain_type == 0 && c.owner_id == 0)
+        .count();
 
     // Timing
     tick_durations.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -587,11 +722,23 @@ fn run_single_complete_match(
     } else {
         0.5
     };
-    let p99_idx = ((tick_durations.len() as f64 * 0.99) as usize).min(tick_durations.len().saturating_sub(1));
-    let p99_tick_ms = tick_durations.get(p99_idx).copied().unwrap_or(avg_tick_ms * 1.5);
+    let p99_idx =
+        ((tick_durations.len() as f64 * 0.99) as usize).min(tick_durations.len().saturating_sub(1));
+    let p99_tick_ms = tick_durations
+        .get(p99_idx)
+        .copied()
+        .unwrap_or(avg_tick_ms * 1.5);
 
-    let avg_ai_ms = if !ai_durations.is_empty() { ai_durations.iter().sum::<f64>() / ai_durations.len() as f64 } else { 0.0 };
-    let avg_step_ms = if !step_durations.is_empty() { step_durations.iter().sum::<f64>() / step_durations.len() as f64 } else { 0.0 };
+    let avg_ai_ms = if !ai_durations.is_empty() {
+        ai_durations.iter().sum::<f64>() / ai_durations.len() as f64
+    } else {
+        0.0
+    };
+    let avg_step_ms = if !step_durations.is_empty() {
+        step_durations.iter().sum::<f64>() / step_durations.len() as f64
+    } else {
+        0.0
+    };
     let total_measured = (avg_ai_ms + avg_step_ms).max(0.001);
     let ai_time_pct = (avg_ai_ms / total_measured) * 100.0;
     let sim_step_time_pct = (avg_step_ms / total_measured) * 100.0;
@@ -694,15 +841,25 @@ fn main() {
 
     println!(
         "[CONFIG] Mode: {}, Attempts: {}, Max Ticks/Attempt: {} (~{:.1} sim min)",
-        if is_snapshot { "SNAPSHOT (10k-tick leader)" } else { "COMPLETE-MATCH ATTEMPTS (Domination / Elimination)" },
+        if is_snapshot {
+            "SNAPSHOT (10k-tick leader)"
+        } else {
+            "COMPLETE-MATCH ATTEMPTS (Domination / Elimination)"
+        },
         match_count,
         max_ticks,
         max_ticks as f64 * 0.05 / 60.0
     );
 
     let campaign_start = Instant::now();
-    let num_threads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(4).min(8);
-    println!("[RUNNER] Spawning {} parallel simulation worker threads...", num_threads);
+    let num_threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .min(8);
+    println!(
+        "[RUNNER] Spawning {} parallel simulation worker threads...",
+        num_threads
+    );
 
     let (tx, rx) = std::sync::mpsc::channel();
     let chunk_size = (match_count + num_threads - 1) / num_threads;
@@ -710,7 +867,9 @@ fn main() {
     for t in 0..num_threads {
         let start_idx = t * chunk_size + 1;
         let end_idx = ((t + 1) * chunk_size).min(match_count);
-        if start_idx > match_count { break; }
+        if start_idx > match_count {
+            break;
+        }
         let thread_tx = tx.clone();
         std::thread::spawn(move || {
             for m in start_idx..=end_idx {
@@ -734,9 +893,18 @@ fn main() {
         }
 
         let res_str = if record.match_completed {
-            format!("Winner: {:<12} ({:>4} cells, {:>4.1}%)", record.winner_civ, record.winner_territory, record.winner_territory_pct)
+            format!(
+                "Winner: {:<12} ({:>4} cells, {:>4.1}%)",
+                record.winner_civ, record.winner_territory, record.winner_territory_pct
+            )
         } else {
-            format!("Leader: {:<12} ({:>4} cells, {:>4.1}%) [{}]", record.leader_at_checkpoint, record.leader_territory, record.leader_territory_pct, record.end_reason)
+            format!(
+                "Leader: {:<12} ({:>4} cells, {:>4.1}%) [{}]",
+                record.leader_at_checkpoint,
+                record.leader_territory,
+                record.leader_territory_pct,
+                record.end_reason
+            )
         };
         println!(
             "  [DONE {:>2}/{:<2}] Match {:>2} [Seed {:>5}] -> {} | Dur: {:>5}t ({:.1}m) | Surviving: {:>2} | Casualties: {:>9.0} | Time: {:.0}ms",
@@ -764,7 +932,7 @@ fn main() {
 
     // 1. Write complete_match_metrics.csv
     let csv_path = out_dir.join("complete_match_metrics.csv");
-    let mut csv = String::from("seed,match_completed,duration_ticks,duration_minutes,winner_civ,winner_faction,winner_territory_pct,winner_population,leader_at_checkpoint,leader_territory_pct,runner_up,first_contact_time,first_war_time,first_elimination_time,half_field_time,surviving_civs_5min,surviving_civs_10min,surviving_civs_15min,final_surviving_civs,neutral_land_pct_5min,neutral_land_pct_10min,neutral_land_pct_15min,neutral_land_pct_20min,largest_share_5min,largest_share_10min,largest_share_15min,largest_share_20min,top3_share_20min,wars_started,wars_completed,operations_started,operations_ended,operations_stalled,operations_retreating,operations_breakthrough,avg_operation_duration_sec,median_operation_duration_sec,avg_committed_pop,median_committed_pop,total_casualties,casualties_per_war,casualties_per_operation,territory_cells_changed,territory_turnover_pct,avg_cells_captured_per_op,median_cells_captured_per_op,capital_captures,capital_relocations,encirclements,avg_consolidation_5min,avg_consolidation_10min,avg_consolidation_15min,avg_consolidation_20min,avg_supply_20min,avg_cohesion_20min,factions_no_war_20min,factions_active_war_20min,micro_survivors_1_2,micro_survivors_3_5,micro_survivors_6_20,large_survivors_20_plus,end_reason,avg_tick_ms,p99_tick_ms\n");
+    let mut csv = String::from("seed,match_completed,duration_ticks,duration_minutes,winner_civ,winner_faction,winner_territory_pct,winner_population,leader_at_checkpoint,leader_territory_pct,runner_up,first_contact_time,first_war_time,first_elimination_time,half_field_time,surviving_civs_5min,surviving_civs_10min,surviving_civs_15min,final_surviving_civs,playable_neutral_land_pct_5min,playable_neutral_land_pct_10min,playable_neutral_land_pct_15min,playable_neutral_land_pct_20min,raw_neutral_land_pct_5min,raw_neutral_land_pct_10min,raw_neutral_land_pct_15min,raw_neutral_land_pct_20min,largest_share_5min,largest_share_10min,largest_share_15min,largest_share_20min,top3_share_20min,wars_started,wars_completed,operations_started,operations_ended,operations_stalled,operations_retreating,operations_breakthrough,avg_operation_duration_sec,median_operation_duration_sec,avg_committed_pop,median_committed_pop,total_casualties,casualties_per_war,casualties_per_operation,territory_cells_changed,territory_turnover_pct,avg_cells_captured_per_op,median_cells_captured_per_op,capital_captures,capital_relocations,encirclements,avg_consolidation_5min,avg_consolidation_10min,avg_consolidation_15min,avg_consolidation_20min,avg_supply_20min,avg_cohesion_20min,factions_no_war_20min,factions_active_war_20min,micro_survivors_1_2,micro_survivors_3_5,micro_survivors_6_20,large_survivors_20_plus,end_reason,avg_tick_ms,p99_tick_ms\n");
 
     for r in &records {
         let snap_5 = r.snapshots.iter().find(|s| s.minute == 5);
@@ -773,7 +941,7 @@ fn main() {
         let snap_20 = r.snapshots.iter().find(|s| s.minute == 20);
 
         csv.push_str(&format!(
-            "{},{},{},{:.2},\"{}\",{},{:.2},{:.0},\"{}\",{:.2},\"{}\",{:.2},{:.2},{:.2},{:.2},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{:.2},{:.2},{:.0},{:.0},{:.0},{:.0},{:.0},{},{:.2},{:.2},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},\"{}\",{:.2},{:.2}\n",
+            "{},{},{},{:.2},\"{}\",{},{:.2},{:.0},\"{}\",{:.2},\"{}\",{:.2},{:.2},{:.2},{:.2},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},{},{:.2},{:.2},{:.0},{:.0},{:.0},{:.0},{:.0},{},{:.2},{:.2},{},{},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{},{},{},{},{},{},\"{}\",{:.2},{:.2}\n",
             r.seed, r.match_completed, r.duration_ticks, r.duration_minutes, r.winner_civ, r.winner_faction,
             r.winner_territory_pct, r.winner_population, r.leader_at_checkpoint, r.leader_territory_pct, r.runner_up,
             r.first_contact_time, r.first_war_time, r.first_elimination_time, r.half_field_time,
@@ -785,6 +953,10 @@ fn main() {
             snap_10.map(|s| s.neutral_land_pct).unwrap_or(0.0),
             snap_15.map(|s| s.neutral_land_pct).unwrap_or(0.0),
             snap_20.map(|s| s.neutral_land_pct).unwrap_or(0.0),
+            snap_5.map(|s| s.raw_neutral_land_pct).unwrap_or(0.0),
+            snap_10.map(|s| s.raw_neutral_land_pct).unwrap_or(0.0),
+            snap_15.map(|s| s.raw_neutral_land_pct).unwrap_or(0.0),
+            snap_20.map(|s| s.raw_neutral_land_pct).unwrap_or(0.0),
             snap_5.map(|s| s.largest_territory_share).unwrap_or(0.0),
             snap_10.map(|s| s.largest_territory_share).unwrap_or(0.0),
             snap_15.map(|s| s.largest_territory_share).unwrap_or(0.0),
@@ -821,7 +993,8 @@ fn main() {
     let diag_path = out_dir.join("stalemate_diagnostic_report.md");
     let mut diag_md = String::new();
 
-    diag_md.push_str("# Dominion of Sol — 10 Complete-Match Attempts Stalemate Diagnostic Report\n\n");
+    diag_md
+        .push_str("# Dominion of Sol — 10 Complete-Match Attempts Stalemate Diagnostic Report\n\n");
     diag_md.push_str("## 1. Pacing & Outcome Truth Status\n\n");
     diag_md.push_str("- **REAL COMPLETE-MATCH ATTEMPTS**: 10\n");
     diag_md.push_str("- **AUTHORITATIVE COMPLETIONS**: 0 / 10\n");
@@ -832,22 +1005,83 @@ fn main() {
     diag_md.push_str("- **NATURAL MATCH COMPLETION**: **FAIL**\n\n");
 
     // Medians calculation
-    let mut surv_5: Vec<usize> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 5).map(|s| s.survivors)).collect();
+    let mut surv_5: Vec<usize> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 5)
+                .map(|s| s.survivors)
+        })
+        .collect();
     surv_5.sort_unstable();
-    let mut surv_10: Vec<usize> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 10).map(|s| s.survivors)).collect();
+    let mut surv_10: Vec<usize> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 10)
+                .map(|s| s.survivors)
+        })
+        .collect();
     surv_10.sort_unstable();
-    let mut surv_15: Vec<usize> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 15).map(|s| s.survivors)).collect();
+    let mut surv_15: Vec<usize> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 15)
+                .map(|s| s.survivors)
+        })
+        .collect();
     surv_15.sort_unstable();
-    let mut surv_20: Vec<usize> = records.iter().map(|r| r.survivor_buckets.details.len()).collect();
+    let mut surv_20: Vec<usize> = records
+        .iter()
+        .map(|r| r.survivor_buckets.details.len())
+        .collect();
     surv_20.sort_unstable();
 
-    let mut neut_20: Vec<f64> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 20).map(|s| s.neutral_land_pct)).collect();
+    let mut neut_20: Vec<f64> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 20)
+                .map(|s| s.neutral_land_pct)
+        })
+        .collect();
     neut_20.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut raw_neut_20: Vec<f64> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 20)
+                .map(|s| s.raw_neutral_land_pct)
+        })
+        .collect();
+    raw_neut_20.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut largest_20: Vec<f64> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 20).map(|s| s.largest_territory_share)).collect();
+    let mut largest_20: Vec<f64> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 20)
+                .map(|s| s.largest_territory_share)
+        })
+        .collect();
     largest_20.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut top3_20: Vec<f64> = records.iter().filter_map(|r| r.snapshots.iter().find(|s| s.minute == 20).map(|s| s.top3_territory_share)).collect();
+    let mut top3_20: Vec<f64> = records
+        .iter()
+        .filter_map(|r| {
+            r.snapshots
+                .iter()
+                .find(|s| s.minute == 20)
+                .map(|s| s.top3_territory_share)
+        })
+        .collect();
     top3_20.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let mut ops_started_list: Vec<usize> = records.iter().map(|r| r.operations_started).collect();
@@ -856,61 +1090,157 @@ fn main() {
     let mut ops_stalled_list: Vec<usize> = records.iter().map(|r| r.operations_stalled).collect();
     ops_stalled_list.sort_unstable();
 
-    let mut med_captured_list: Vec<u32> = records.iter().map(|r| r.median_cells_captured_per_op).collect();
+    let mut med_captured_list: Vec<u32> = records
+        .iter()
+        .map(|r| r.median_cells_captured_per_op)
+        .collect();
     med_captured_list.sort_unstable();
 
     let mut med_cas_list: Vec<f64> = records.iter().map(|r| r.casualties_per_operation).collect();
     med_cas_list.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let mut b_1_2: Vec<usize> = records.iter().map(|r| r.survivor_buckets.cells_1_2).collect();
+    let mut b_1_2: Vec<usize> = records
+        .iter()
+        .map(|r| r.survivor_buckets.cells_1_2)
+        .collect();
     b_1_2.sort_unstable();
-    let mut b_3_5: Vec<usize> = records.iter().map(|r| r.survivor_buckets.cells_3_5).collect();
+    let mut b_3_5: Vec<usize> = records
+        .iter()
+        .map(|r| r.survivor_buckets.cells_3_5)
+        .collect();
     b_3_5.sort_unstable();
 
     diag_md.push_str("## 2. Aggregate Pacing Summary\n\n");
-    diag_md.push_str(&format!("- **MEDIAN SURVIVORS 5 MIN**: {} / 44\n", surv_5[surv_5.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN SURVIVORS 10 MIN**: {} / 44\n", surv_10[surv_10.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN SURVIVORS 15 MIN**: {} / 44\n", surv_15[surv_15.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN SURVIVORS 20 MIN**: {} / 44\n", surv_20[surv_20.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN NEUTRAL LAND 20 MIN**: {:.2}%\n", neut_20[neut_20.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN LARGEST TERRITORY SHARE 20 MIN**: {:.2}%\n", largest_20[largest_20.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN TOP3 TERRITORY SHARE 20 MIN**: {:.2}%\n", top3_20[top3_20.len() / 2]));
-    diag_md.push_str(&format!("- **OPERATIONS STARTED MEDIAN**: {}\n", ops_started_list[ops_started_list.len() / 2]));
-    diag_md.push_str(&format!("- **OPERATIONS STALLED MEDIAN**: {}\n", ops_stalled_list[ops_stalled_list.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN CELLS CAPTURED PER OPERATION**: {} cells\n", med_captured_list[med_captured_list.len() / 2]));
-    diag_md.push_str(&format!("- **MEDIAN CASUALTIES PER OPERATION**: {:.0}\n", med_cas_list[med_cas_list.len() / 2]));
-    diag_md.push_str(&format!("- **MICRO-SURVIVORS 1–2 CELLS (MEDIAN)**: {}\n", b_1_2[b_1_2.len() / 2]));
-    diag_md.push_str(&format!("- **MICRO-SURVIVORS 3–5 CELLS (MEDIAN)**: {}\n", b_3_5[b_3_5.len() / 2]));
+    diag_md.push_str(&format!(
+        "- **MEDIAN SURVIVORS 5 MIN**: {} / 44\n",
+        surv_5[surv_5.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN SURVIVORS 10 MIN**: {} / 44\n",
+        surv_10[surv_10.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN SURVIVORS 15 MIN**: {} / 44\n",
+        surv_15[surv_15.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN SURVIVORS 20 MIN**: {} / 44\n",
+        surv_20[surv_20.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN PLAYABLE NEUTRAL LAND 20 MIN**: {:.2}%\n",
+        neut_20[neut_20.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN RAW NEUTRAL LAND 20 MIN**: {:.2}% (non-playable / unsupported geography remains separate)\n",
+        raw_neut_20[raw_neut_20.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN LARGEST TERRITORY SHARE 20 MIN**: {:.2}%\n",
+        largest_20[largest_20.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN TOP3 TERRITORY SHARE 20 MIN**: {:.2}%\n",
+        top3_20[top3_20.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **OPERATIONS STARTED MEDIAN**: {}\n",
+        ops_started_list[ops_started_list.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **OPERATIONS STALLED MEDIAN**: {}\n",
+        ops_stalled_list[ops_stalled_list.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN CELLS CAPTURED PER OPERATION**: {} cells\n",
+        med_captured_list[med_captured_list.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MEDIAN CASUALTIES PER OPERATION**: {:.0}\n",
+        med_cas_list[med_cas_list.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MICRO-SURVIVORS 1–2 CELLS (MEDIAN)**: {}\n",
+        b_1_2[b_1_2.len() / 2]
+    ));
+    diag_md.push_str(&format!(
+        "- **MICRO-SURVIVORS 3–5 CELLS (MEDIAN)**: {}\n",
+        b_3_5[b_3_5.len() / 2]
+    ));
 
     let avg_tick = records.iter().map(|r| r.avg_tick_ms).sum::<f64>() / match_count as f64;
     let p99_tick = records.iter().map(|r| r.p99_tick_ms).sum::<f64>() / match_count as f64;
     let p99_status = if p99_tick <= 50.0 { "PASS" } else { "FAIL" };
 
-    diag_md.push_str(&format!("- **AVG TICK**: {:.2} ms (BUDGET: 50 ms @ 20Hz -> PASS)\n", avg_tick));
-    diag_md.push_str(&format!("- **P99 TICK**: {:.2} ms (BUDGET: 50 ms @ 20Hz -> {})\n", p99_tick, p99_status));
+    diag_md.push_str(&format!(
+        "- **AVG TICK**: {:.2} ms (BUDGET: 50 ms @ 20Hz -> PASS)\n",
+        avg_tick
+    ));
+    diag_md.push_str(&format!(
+        "- **P99 TICK**: {:.2} ms (BUDGET: 50 ms @ 20Hz -> {})\n",
+        p99_tick, p99_status
+    ));
     diag_md.push_str(&format!("- **P99 BUDGET STATUS**: {}\n\n", p99_status));
 
     // Operations breakdown table
     let total_ops_started: usize = records.iter().map(|r| r.operations_started).sum();
     let total_ops_ended: usize = records.iter().map(|r| r.operations_ended).sum();
-    let total_gain: usize = records.iter().map(|r| r.operations_ended_attacker_gain).sum();
-    let total_hold: usize = records.iter().map(|r| r.operations_ended_defender_hold).sum();
+    let total_gain: usize = records
+        .iter()
+        .map(|r| r.operations_ended_attacker_gain)
+        .sum();
+    let total_hold: usize = records
+        .iter()
+        .map(|r| r.operations_ended_defender_hold)
+        .sum();
     let total_stalled: usize = records.iter().map(|r| r.operations_stalled).sum();
     let total_retreating: usize = records.iter().map(|r| r.operations_retreating).sum();
     let total_breakthrough: usize = records.iter().map(|r| r.operations_breakthrough).sum();
-    let total_att_elim: usize = records.iter().map(|r| r.operations_attacker_eliminated).sum();
-    let total_def_elim: usize = records.iter().map(|r| r.operations_defender_eliminated).sum();
+    let total_att_elim: usize = records
+        .iter()
+        .map(|r| r.operations_attacker_eliminated)
+        .sum();
+    let total_def_elim: usize = records
+        .iter()
+        .map(|r| r.operations_defender_eliminated)
+        .sum();
 
     diag_md.push_str("## 3. Operation Outcome Distribution (10 Matches Combined)\n\n");
-    diag_md.push_str(&format!("- **OPERATIONS_STARTED**: {}\n", total_ops_started));
+    diag_md.push_str(&format!(
+        "- **OPERATIONS_STARTED**: {}\n",
+        total_ops_started
+    ));
     diag_md.push_str(&format!("- **OPERATIONS_ENDED**: {}\n", total_ops_ended));
-    diag_md.push_str(&format!("- **ENDED_WITH_ATTACKER_GAIN**: {} ({:.1}% of ended)\n", total_gain, (total_gain as f64 / total_ops_ended.max(1) as f64) * 100.0));
-    diag_md.push_str(&format!("- **ENDED_WITH_DEFENDER_HOLD**: {} ({:.1}% of ended)\n", total_hold, (total_hold as f64 / total_ops_ended.max(1) as f64) * 100.0));
-    diag_md.push_str(&format!("- **STALLED (At least once)**: {} ({:.1}% of started)\n", total_stalled, (total_stalled as f64 / total_ops_started.max(1) as f64) * 100.0));
-    diag_md.push_str(&format!("- **RETREATED**: {} ({:.1}% of started)\n", total_retreating, (total_retreating as f64 / total_ops_started.max(1) as f64) * 100.0));
-    diag_md.push_str(&format!("- **BREAKTHROUGH**: {} ({:.1}% of started)\n", total_breakthrough, (total_breakthrough as f64 / total_ops_started.max(1) as f64) * 100.0));
+    diag_md.push_str(&format!(
+        "- **ENDED_WITH_ATTACKER_GAIN**: {} ({:.1}% of ended)\n",
+        total_gain,
+        (total_gain as f64 / total_ops_ended.max(1) as f64) * 100.0
+    ));
+    diag_md.push_str(&format!(
+        "- **ENDED_WITH_DEFENDER_HOLD**: {} ({:.1}% of ended)\n",
+        total_hold,
+        (total_hold as f64 / total_ops_ended.max(1) as f64) * 100.0
+    ));
+    diag_md.push_str(&format!(
+        "- **STALLED (At least once)**: {} ({:.1}% of started)\n",
+        total_stalled,
+        (total_stalled as f64 / total_ops_started.max(1) as f64) * 100.0
+    ));
+    diag_md.push_str(&format!(
+        "- **RETREATED**: {} ({:.1}% of started)\n",
+        total_retreating,
+        (total_retreating as f64 / total_ops_started.max(1) as f64) * 100.0
+    ));
+    diag_md.push_str(&format!(
+        "- **BREAKTHROUGH**: {} ({:.1}% of started)\n",
+        total_breakthrough,
+        (total_breakthrough as f64 / total_ops_started.max(1) as f64) * 100.0
+    ));
     diag_md.push_str(&format!("- **ATTACKER_ELIMINATED**: {}\n", total_att_elim));
-    diag_md.push_str(&format!("- **DEFENDER_ELIMINATED**: {}\n\n", total_def_elim));
+    diag_md.push_str(&format!(
+        "- **DEFENDER_ELIMINATED**: {}\n\n",
+        total_def_elim
+    ));
 
     // Per match telemetry table
     diag_md.push_str("## 4. Per-Match Telemetry Table (10 Attempts)\n\n");
@@ -949,7 +1279,13 @@ fn main() {
         for s in &sample.survivor_buckets.details {
             diag_md.push_str(&format!(
                 "| `{}` | {} | {:.0} | {:.0} | {:.2}% | {} | {} |\n",
-                s.civ_id, s.cells, s.area_km2, s.population, s.territory_share, s.active_fronts, s.capital_status
+                s.civ_id,
+                s.cells,
+                s.area_km2,
+                s.population,
+                s.territory_share,
+                s.active_fronts,
+                s.capital_status
             ));
         }
     }
@@ -959,23 +1295,53 @@ fn main() {
     let total_accepted: u64 = records.iter().map(|r| r.ai_accepted).sum();
     let total_pauses: u32 = records.iter().map(|r| r.ai_pauses).sum();
     let total_expansion: u32 = records.iter().map(|r| r.ai_expansion_orders).sum();
-    let med_neutral_cells = records.iter().map(|r| r.neutral_land_cells_20min).sum::<usize>() / match_count.max(1);
+    let med_neutral_cells = records
+        .iter()
+        .map(|r| r.neutral_land_cells_20min)
+        .sum::<usize>()
+        / match_count.max(1);
 
     diag_md.push_str("\n## 6. AI Strategic Decision Telemetry (Aggregate 10 Matches)\n\n");
-    diag_md.push_str(&format!("- **Total AI Orders Attempted**: {}\n", total_attempts));
-    diag_md.push_str(&format!("- **Total AI Orders Accepted**: {} ({:.1}% acceptance rate)\n", total_accepted, (total_accepted as f64 / total_attempts.max(1) as f64) * 100.0));
-    diag_md.push_str(&format!("- **Total Consolidate / Pause Decisions**: {} pauses across bots\n", total_pauses));
-    diag_md.push_str(&format!("- **Total Neutral Expansion Orders Accepted**: {}\n", total_expansion));
-    diag_md.push_str(&format!("- **Average Neutral Land Remaining @ 20m**: {} cells\n", med_neutral_cells));
+    diag_md.push_str(&format!(
+        "- **Total AI Orders Attempted**: {}\n",
+        total_attempts
+    ));
+    diag_md.push_str(&format!(
+        "- **Total AI Orders Accepted**: {} ({:.1}% acceptance rate)\n",
+        total_accepted,
+        (total_accepted as f64 / total_attempts.max(1) as f64) * 100.0
+    ));
+    diag_md.push_str(&format!(
+        "- **Total Consolidate / Pause Decisions**: {} pauses across bots\n",
+        total_pauses
+    ));
+    diag_md.push_str(&format!(
+        "- **Total Neutral Expansion Orders Accepted**: {}\n",
+        total_expansion
+    ));
+    diag_md.push_str(&format!(
+        "- **Average Neutral Land Remaining @ 20m**: {} cells\n",
+        med_neutral_cells
+    ));
 
     // Performance Subsystem Breakdown
     let avg_ai_pct = records.iter().map(|r| r.ai_time_pct).sum::<f64>() / match_count as f64;
-    let avg_step_pct = records.iter().map(|r| r.sim_step_time_pct).sum::<f64>() / match_count as f64;
+    let avg_step_pct =
+        records.iter().map(|r| r.sim_step_time_pct).sum::<f64>() / match_count as f64;
     diag_md.push_str("\n## 7. Performance Subsystem Profiling\n\n");
     diag_md.push_str(&format!("- **AI Processing Share**: {:.1}%\n", avg_ai_pct));
-    diag_md.push_str(&format!("- **Simulation Step Share**: {:.1}%\n", avg_step_pct));
-    diag_md.push_str(&format!("- **Average Tick Time**: {:.2} ms (BUDGET: 50 ms -> PASS)\n", avg_tick));
-    diag_md.push_str(&format!("- **P99 Tick Time**: {:.2} ms (BUDGET: 50 ms -> FAIL)\n\n", p99_tick));
+    diag_md.push_str(&format!(
+        "- **Simulation Step Share**: {:.1}%\n",
+        avg_step_pct
+    ));
+    diag_md.push_str(&format!(
+        "- **Average Tick Time**: {:.2} ms (BUDGET: 50 ms -> PASS)\n",
+        avg_tick
+    ));
+    diag_md.push_str(&format!(
+        "- **P99 Tick Time**: {:.2} ms (BUDGET: 50 ms -> FAIL)\n\n",
+        p99_tick
+    ));
 
     fs::write(&diag_path, diag_md).unwrap();
     println!("[SAVED] stalemate_diagnostic_report.md");
@@ -983,7 +1349,9 @@ fn main() {
     // 3. Write civilization_balance_report.md with truthful titles and status
     let civ_report_path = out_dir.join("civilization_balance_report.md");
     let mut civ_md = String::new();
-    civ_md.push_str("# Dominion of Sol — Civilization Balance Report (10 Complete-Match Attempts)\n\n");
+    civ_md.push_str(
+        "# Dominion of Sol — Civilization Balance Report (10 Complete-Match Attempts)\n\n",
+    );
     civ_md.push_str("## 1. Pacing & Outcome Truth Status\n\n");
     civ_md.push_str(&format!(
         "- **Match Attempts Executed**: {} Complete-Match Attempts\n- **Authoritative Completions**: 0 / {}\n- **Authoritative Match Duration Median**: N/A\n- **Safety-Timeout Horizon**: 20:00 (24,000 ticks)\n- **Endgame Pacing Status**: **FAIL**\n- **Natural Match Completion**: **FAIL**\n- **Median First War**: {}\n- **Median First Elimination**: {}\n- **Median Surviving Nations @ 20m**: {} / 44\n- **Peak Civilization Win Rate**: 0.0% (`NONE`)\n- **Zero-Win Civilizations**: 44 / 44\n\n",
@@ -993,7 +1361,8 @@ fn main() {
         surv_20[surv_20.len() / 2]
     ));
     civ_md.push_str("## 2. Full 44-Civilization Victory Distribution\n\n");
-    civ_md.push_str("| Civilization ID | Canonical Name | Region | Wins | Win Rate (%) | Status |\n");
+    civ_md
+        .push_str("| Civilization ID | Canonical Name | Region | Wins | Win Rate (%) | Status |\n");
     civ_md.push_str("|---|---|---|---|---|---|\n");
     for c in CANONICAL_CIVILIZATIONS.iter() {
         civ_md.push_str(&format!(

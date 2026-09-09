@@ -2,7 +2,9 @@ use crate::chokepoints::{build_strategic_sites, StrategicSiteInfo};
 use crate::combat::CombatManager;
 use crate::compact_patch::{generate_compact_patch, PatchMode, PatchResult};
 use crate::factions::{generate_100_factions, generate_44_civilization_factions};
-use crate::protocol::{AllianceInfo, AllianceProposalInfo, CellDelta, CellState, FactionInfo, PortStateInfo};
+use crate::protocol::{
+    AllianceInfo, AllianceProposalInfo, CellDelta, CellState, FactionInfo, PortStateInfo,
+};
 use crate::world_map::{
     cell_to_chunk, generate_world_land_mask, TOTAL_CELLS, WORLD_HEIGHT, WORLD_WIDTH,
 };
@@ -23,6 +25,9 @@ pub const MIN_ATTACK_DEPLOYMENT: f64 = 50.0;
 pub const MIN_DEFENSE_FOCUS: f64 = 20.0;
 pub const PLAYER_FACTION_ID: u8 = 101;
 pub const AI_FACTION_COUNT: usize = 100;
+pub const CELL_FLAG_MEANINGFUL_OVERSEAS: u8 = 1 << 4;
+pub const CELL_FLAG_TINY_UNSUPPORTED: u8 = 1 << 5;
+pub const CELL_FLAG_MAJOR_UNSEEDED: u8 = 1 << 6;
 
 const EARTH_RADIUS_KM: f64 = 6_371.0;
 const CONSOLIDATION_SECONDS: f64 = 20.0;
@@ -48,6 +53,16 @@ pub struct ExpansionOutcome {
     pub population_cost: f64,
     pub first_contact: Option<(u8, u8, u32)>,
     pub resolved_anchor: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PopulationGrowthBreakdown {
+    pub reserve_component: f64,
+    pub territory_component: f64,
+    pub saturation_factor: f64,
+    pub population_capacity: f64,
+    pub doctrine_modifier: f64,
+    pub final_component: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,6 +138,17 @@ pub struct PendingExpansionAdvance {
     pub had_sea_before: bool,
 }
 
+struct LandClassificationMasks {
+    reachable: Vec<u8>,
+    reachable_cells: usize,
+    meaningful_overseas: Vec<u8>,
+    meaningful_overseas_cells: usize,
+    tiny_unsupported: Vec<u8>,
+    tiny_unsupported_cells: usize,
+    major_unseeded: Vec<u8>,
+    major_unseeded_cells: usize,
+}
+
 pub struct Simulation {
     pub tick: u64,
     pub sequence: u64,
@@ -132,6 +158,16 @@ pub struct Simulation {
     pub factions: Vec<FactionInfo>,
     pub combat_manager: CombatManager,
     pub total_land_cells: usize,
+    /// Canonical land components containing a fresh-match nucleus, plus an
+    /// overseas component only after a legal explicit landing activates it.
+    pub playable_land_cells: usize,
+    pub playable_land_mask: Vec<u8>,
+    pub meaningful_overseas_land_cells: usize,
+    pub meaningful_overseas_land_mask: Vec<u8>,
+    pub tiny_unsupported_land_cells: usize,
+    pub tiny_unsupported_land_mask: Vec<u8>,
+    pub major_unseeded_land_cells: usize,
+    pub major_unseeded_land_mask: Vec<u8>,
     pub strategic_sites: Vec<StrategicSiteInfo>,
     pub match_over: bool,
     pub winner_faction_id: Option<u8>,
@@ -170,6 +206,15 @@ pub struct Simulation {
     pub encirclements_count: usize,
     pub evaluate_match_outcome: bool,
     pub faction_frontiers: Vec<HashSet<u32>>,
+    // Cumulative, read-only runtime profiling counters used by the balance
+    // harness. Keeping these beside the authoritative work lets the harness
+    // distinguish local-front matching/theatre traversal from pressure
+    // resolution without changing any gameplay decisions.
+    pub profile_front_match_ns: u128,
+    pub profile_theatre_traversal_ns: u128,
+    pub profile_front_match_calls: u64,
+    pub profile_war_resolution_ns: u128,
+    pub profile_war_resolution_calls: u64,
 }
 
 impl Simulation {
@@ -197,7 +242,13 @@ impl Simulation {
         let combat_manager = CombatManager::new();
         let mut cell_consolidation = vec![0.0f32; TOTAL_CELLS];
 
-        Self::seed_civilization_nuclei_with_seed(&mut cells, &mut cell_consolidation, &mut factions, match_seed);
+        Self::seed_civilization_nuclei_with_seed(
+            &mut cells,
+            &mut cell_consolidation,
+            &mut factions,
+            match_seed,
+        );
+        let land_classes = Self::build_land_classification_masks(&mut cells);
 
         let strategic_sites = build_strategic_sites(&land_mask);
         let mut simulation = Self {
@@ -209,6 +260,14 @@ impl Simulation {
             factions,
             combat_manager,
             total_land_cells: total_land,
+            playable_land_cells: land_classes.reachable_cells,
+            playable_land_mask: land_classes.reachable,
+            meaningful_overseas_land_cells: land_classes.meaningful_overseas_cells,
+            meaningful_overseas_land_mask: land_classes.meaningful_overseas,
+            tiny_unsupported_land_cells: land_classes.tiny_unsupported_cells,
+            tiny_unsupported_land_mask: land_classes.tiny_unsupported,
+            major_unseeded_land_cells: land_classes.major_unseeded_cells,
+            major_unseeded_land_mask: land_classes.major_unseeded,
             strategic_sites,
             match_over: false,
             winner_faction_id: None,
@@ -246,6 +305,11 @@ impl Simulation {
             encirclements_count: 0,
             evaluate_match_outcome: true,
             faction_frontiers: vec![HashSet::new(); 256],
+            profile_front_match_ns: 0,
+            profile_theatre_traversal_ns: 0,
+            profile_front_match_calls: 0,
+            profile_war_resolution_ns: 0,
+            profile_war_resolution_calls: 0,
         };
 
         simulation.recompute_area_stats();
@@ -281,32 +345,33 @@ impl Simulation {
 
         let mut pq = std::collections::BinaryHeap::new();
 
-        let add_neighbors = |cell: usize,
-                             pq: &mut std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64, usize)>>,
-                             visited: &mut HashSet<usize>| {
-            let cx = cell % WORLD_WIDTH;
-            let cy = cell / WORLD_WIDTH;
-            let neighbors = [
-                (cy > 0).then(|| (cy - 1) * WORLD_WIDTH + cx),
-                Some(cy * WORLD_WIDTH + (cx + 1) % WORLD_WIDTH),
-                (cy + 1 < WORLD_HEIGHT).then(|| (cy + 1) * WORLD_WIDTH + cx),
-                Some(cy * WORLD_WIDTH + (cx + WORLD_WIDTH - 1) % WORLD_WIDTH),
-            ];
-            for n in neighbors.into_iter().flatten() {
-                if visited.insert(n) {
-                    let nx = n % WORLD_WIDTH;
-                    let ny = n / WORLD_WIDTH;
-                    let mut dx = (nx as isize - cap_x as isize).abs() as usize;
-                    if dx > WORLD_WIDTH / 2 {
-                        dx = WORLD_WIDTH - dx;
+        let add_neighbors =
+            |cell: usize,
+             pq: &mut std::collections::BinaryHeap<std::cmp::Reverse<(u64, u64, usize)>>,
+             visited: &mut HashSet<usize>| {
+                let cx = cell % WORLD_WIDTH;
+                let cy = cell / WORLD_WIDTH;
+                let neighbors = [
+                    (cy > 0).then(|| (cy - 1) * WORLD_WIDTH + cx),
+                    Some(cy * WORLD_WIDTH + (cx + 1) % WORLD_WIDTH),
+                    (cy + 1 < WORLD_HEIGHT).then(|| (cy + 1) * WORLD_WIDTH + cx),
+                    Some(cy * WORLD_WIDTH + (cx + WORLD_WIDTH - 1) % WORLD_WIDTH),
+                ];
+                for n in neighbors.into_iter().flatten() {
+                    if visited.insert(n) {
+                        let nx = n % WORLD_WIDTH;
+                        let ny = n / WORLD_WIDTH;
+                        let mut dx = (nx as isize - cap_x as isize).abs() as usize;
+                        if dx > WORLD_WIDTH / 2 {
+                            dx = WORLD_WIDTH - dx;
+                        }
+                        let dy = (ny as isize - cap_y as isize).abs() as usize;
+                        let dist_sq = (dx * dx + dy * dy) as u64;
+                        let hash = crate::compact_patch::tie_hash(faction_seed, n);
+                        pq.push(std::cmp::Reverse((dist_sq, hash, n)));
                     }
-                    let dy = (ny as isize - cap_y as isize).abs() as usize;
-                    let dist_sq = (dx * dx + dy * dy) as u64;
-                    let hash = crate::compact_patch::tie_hash(faction_seed, n);
-                    pq.push(std::cmp::Reverse((dist_sq, hash, n)));
                 }
-            }
-        };
+            };
 
         add_neighbors(cap_idx, &mut pq, &mut visited);
 
@@ -345,13 +410,90 @@ impl Simulation {
         faction.capital_cell = cap_idx as u32;
         faction.territory_count = owned_count;
         faction.controlled_area_km2 = current_area;
-        faction.effective_controlled_area_km2 = current_area * crate::balance::CONSOLIDATION_NEUTRAL_INITIAL as f64;
+        faction.effective_controlled_area_km2 =
+            current_area * crate::balance::CONSOLIDATION_NEUTRAL_INITIAL as f64;
         faction.consolidation_ratio = crate::balance::CONSOLIDATION_NEUTRAL_INITIAL;
         faction.population = crate::balance::INITIAL_LIVING_POPULATION;
         faction.total_living_population = crate::balance::INITIAL_LIVING_POPULATION;
         faction.deployed_population = 0.0;
         faction.is_eliminated = false;
         Self::refresh_faction_economy(faction);
+    }
+
+    /// Classifies every authoritative land component at fresh-match start.
+    /// This is topology and geography metadata only; it never assigns owner.
+    ///
+    /// - A component with a nucleus is reachable ordinary gameplay land.
+    /// - Continental polar authority land is surfaced separately as MAJOR so
+    ///   it cannot be mistaken for a missing playable spawn.
+    /// - An unseeded component >=4 cells and >=5,000 spherical km² is a
+    ///   deliberate overseas candidate, reachable only by an explicit port.
+    /// - Smaller fragments remain real neutral geography but are unsupported
+    ///   for pacing/victory and are never auto-owned.
+    fn build_land_classification_masks(cells: &mut [Cell]) -> LandClassificationMasks {
+        let mut result = LandClassificationMasks {
+            reachable: vec![0; cells.len()],
+            reachable_cells: 0,
+            meaningful_overseas: vec![0; cells.len()],
+            meaningful_overseas_cells: 0,
+            tiny_unsupported: vec![0; cells.len()],
+            tiny_unsupported_cells: 0,
+            major_unseeded: vec![0; cells.len()],
+            major_unseeded_cells: 0,
+        };
+        let mut visited = vec![false; cells.len()];
+        for start in 0..cells.len() {
+            if visited[start] || cells[start].terrain_type != 0 {
+                continue;
+            }
+            visited[start] = true;
+            let mut queue = VecDeque::from([start]);
+            let mut component = Vec::new();
+            let mut spherical_km2 = 0.0;
+            let mut weighted_latitude = 0.0;
+            let mut seeded = false;
+            while let Some(cell) = queue.pop_front() {
+                component.push(cell);
+                let area = Self::cell_area_km2(cell);
+                let y = cell / WORLD_WIDTH;
+                let latitude = 90.0 - ((y as f64 + 0.5) / WORLD_HEIGHT as f64) * 180.0;
+                spherical_km2 += area;
+                weighted_latitude += latitude * area;
+                seeded |= cells[cell].owner_id > 0;
+                for neighbor in crate::expansion::legal_land_neighbors(cells, cell) {
+                    if !visited[neighbor] && cells[neighbor].terrain_type == 0 {
+                        visited[neighbor] = true;
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            let centroid_latitude = weighted_latitude / spherical_km2.max(f64::EPSILON);
+            let is_major_polar = !seeded
+                && component.len() > 1_000
+                && centroid_latitude < -60.0
+                && spherical_km2 > 3_000_000.0;
+            let is_meaningful =
+                !seeded && !is_major_polar && component.len() >= 4 && spherical_km2 >= 5_000.0;
+            for &cell in &component {
+                if seeded {
+                    result.reachable[cell] = 1;
+                    result.reachable_cells += 1;
+                } else if is_major_polar {
+                    result.major_unseeded[cell] = 1;
+                    result.major_unseeded_cells += 1;
+                    cells[cell].state_flags |= CELL_FLAG_MAJOR_UNSEEDED;
+                } else if is_meaningful {
+                    result.meaningful_overseas[cell] = 1;
+                    result.meaningful_overseas_cells += 1;
+                    cells[cell].state_flags |= CELL_FLAG_MEANINGFUL_OVERSEAS;
+                } else {
+                    result.tiny_unsupported[cell] = 1;
+                    result.tiny_unsupported_cells += 1;
+                    cells[cell].state_flags |= CELL_FLAG_TINY_UNSUPPORTED;
+                }
+            }
+        }
+        result
     }
 
     pub fn seed_civilization_nuclei(
@@ -370,7 +512,13 @@ impl Simulation {
     ) {
         for faction in factions.iter_mut() {
             let cap_idx = faction.capital_cell as usize;
-            Self::seed_single_faction_nucleus(cells, cell_consolidation, faction, cap_idx, match_seed);
+            Self::seed_single_faction_nucleus(
+                cells,
+                cell_consolidation,
+                faction,
+                cap_idx,
+                match_seed,
+            );
         }
     }
 
@@ -381,9 +529,9 @@ impl Simulation {
         for idx in 0..self.cells.len() {
             let owner = self.cells[idx].owner_id;
             if owner > 0 && self.cells[idx].terrain_type == 0 {
-                let is_frontier = Self::cardinal(idx).into_iter().any(|n| {
-                    self.cells[n].terrain_type == 0 && self.cells[n].owner_id != owner
-                });
+                let is_frontier = crate::expansion::legal_land_neighbors(&self.cells, idx)
+                    .into_iter()
+                    .any(|n| self.cells[n].terrain_type == 0 && self.cells[n].owner_id != owner);
                 if is_frontier {
                     self.faction_frontiers[owner as usize].insert(idx as u32);
                 }
@@ -415,7 +563,13 @@ impl Simulation {
         let combat_manager = CombatManager::new();
         let mut cell_consolidation = vec![0.0f32; TOTAL_CELLS];
 
-        Self::seed_civilization_nuclei_with_seed(&mut cells, &mut cell_consolidation, &mut factions, match_seed);
+        Self::seed_civilization_nuclei_with_seed(
+            &mut cells,
+            &mut cell_consolidation,
+            &mut factions,
+            match_seed,
+        );
+        let land_classes = Self::build_land_classification_masks(&mut cells);
 
         let strategic_sites = build_strategic_sites(&land_mask);
         let mut simulation = Self {
@@ -427,6 +581,14 @@ impl Simulation {
             factions,
             combat_manager,
             total_land_cells: total_land,
+            playable_land_cells: land_classes.reachable_cells,
+            playable_land_mask: land_classes.reachable,
+            meaningful_overseas_land_cells: land_classes.meaningful_overseas_cells,
+            meaningful_overseas_land_mask: land_classes.meaningful_overseas,
+            tiny_unsupported_land_cells: land_classes.tiny_unsupported_cells,
+            tiny_unsupported_land_mask: land_classes.tiny_unsupported,
+            major_unseeded_land_cells: land_classes.major_unseeded_cells,
+            major_unseeded_land_mask: land_classes.major_unseeded,
             strategic_sites,
             match_over: false,
             winner_faction_id: None,
@@ -464,6 +626,11 @@ impl Simulation {
             encirclements_count: 0,
             evaluate_match_outcome: true,
             faction_frontiers: vec![HashSet::new(); 256],
+            profile_front_match_ns: 0,
+            profile_theatre_traversal_ns: 0,
+            profile_front_match_calls: 0,
+            profile_war_resolution_ns: 0,
+            profile_war_resolution_calls: 0,
         };
 
         simulation.recompute_area_stats();
@@ -474,15 +641,38 @@ impl Simulation {
 
     pub fn neutral_land_ratio(&self) -> f32 {
         let mut neutral_land = 0usize;
-        for cell in &self.cells {
-            if cell.terrain_type == 0 && cell.owner_id == 0 {
+        for (index, cell) in self.cells.iter().enumerate() {
+            if self.playable_land_mask[index] == 1 && cell.owner_id == 0 {
                 neutral_land += 1;
             }
         }
-        if self.total_land_cells > 0 {
-            neutral_land as f32 / self.total_land_cells as f32
+        if self.playable_land_cells > 0 {
+            neutral_land as f32 / self.playable_land_cells as f32
         } else {
             0.0
+        }
+    }
+
+    fn activate_overseas_component(&mut self, landing_cell: u32) {
+        let start = landing_cell as usize;
+        if start >= self.cells.len()
+            || self.meaningful_overseas_land_mask[start] == 0
+            || self.playable_land_mask[start] == 1
+        {
+            return;
+        }
+        let mut seen = HashSet::from([start]);
+        let mut queue = VecDeque::from([start]);
+        while let Some(cell) = queue.pop_front() {
+            if self.playable_land_mask[cell] == 0 {
+                self.playable_land_mask[cell] = 1;
+                self.playable_land_cells += 1;
+            }
+            for neighbor in crate::expansion::legal_land_neighbors(&self.cells, cell) {
+                if self.meaningful_overseas_land_mask[neighbor] == 1 && seen.insert(neighbor) {
+                    queue.push_back(neighbor);
+                }
+            }
         }
     }
 
@@ -499,23 +689,11 @@ impl Simulation {
             let prev_owner = self.cells[idx].owner_id;
 
             // A frontier focus is tied to its exact owned cell. If that cell
-            // changes hands, surviving focused people are released back to
-            // their faction before ownership is committed; they are never
-            // left as an orphaned hidden defense ledger.
+            // changes hands, the commitment is consumed with the position;
+            // it must never become a refundable hidden reserve.
             if prev_owner > 0 && prev_owner != owner_id {
-                let displaced: f64 = self
-                    .defense_foci
-                    .iter()
-                    .filter(|focus| focus.faction_id == prev_owner && focus.cell_index == index)
-                    .map(|focus| focus.deployed_population)
-                    .sum();
                 self.defense_foci
                     .retain(|focus| !(focus.faction_id == prev_owner && focus.cell_index == index));
-                if displaced > 0.0 {
-                    if let Some(faction) = self.factions.iter_mut().find(|f| f.faction_id == prev_owner) {
-                        faction.population += displaced;
-                    }
-                }
             }
             self.cells[idx].owner_id = owner_id;
             if owner_id > 0 {
@@ -536,15 +714,15 @@ impl Simulation {
             if prev_owner > 0 {
                 self.faction_frontiers[prev_owner as usize].remove(&index);
             }
-            let mut check_cells = Vec::with_capacity(5);
+            let mut check_cells = Vec::with_capacity(9);
             check_cells.push(idx);
-            check_cells.extend(Self::cardinal(idx));
+            check_cells.extend(crate::expansion::legal_land_neighbors(&self.cells, idx));
             for c in check_cells {
                 let c_owner = self.cells[c].owner_id;
                 if c_owner > 0 && self.cells[c].terrain_type == 0 {
-                    let has_other_neighbor = Self::cardinal(c).into_iter().any(|n| {
-                        self.cells[n].terrain_type == 0 && self.cells[n].owner_id != c_owner
-                    });
+                    let has_other_neighbor = crate::expansion::legal_land_neighbors(&self.cells, c)
+                        .into_iter()
+                        .any(|n| self.cells[n].owner_id != c_owner);
                     if has_other_neighbor {
                         self.faction_frontiers[c_owner as usize].insert(c as u32);
                     } else {
@@ -560,7 +738,8 @@ impl Simulation {
                     .find(|f| f.faction_id == prev_owner)
                 {
                     fac.territory_count = fac.territory_count.saturating_sub(1);
-                    fac.controlled_area_km2 = (fac.controlled_area_km2 - Self::cell_area_km2(idx)).max(0.0);
+                    fac.controlled_area_km2 =
+                        (fac.controlled_area_km2 - Self::cell_area_km2(idx)).max(0.0);
                 }
             }
             if owner_id > 0 {
@@ -590,10 +769,13 @@ impl Simulation {
                         cell_index: Some(index),
                     });
                 } else if lost_capital {
-                    self.relocation_states.insert(prev_owner, RelocationState {
-                        original_capital: index,
-                        time_remaining: 10.0,
-                    });
+                    self.relocation_states.insert(
+                        prev_owner,
+                        RelocationState {
+                            original_capital: index,
+                            time_remaining: 10.0,
+                        },
+                    );
                     self.capital_captures_count += 1;
                     self.atlas_notifications.push(AtlasNotificationEvent {
                         event_type: "CAPITAL_CAPTURED".to_string(),
@@ -607,7 +789,9 @@ impl Simulation {
             if owner_id > 0 {
                 if let Some(state) = self.relocation_states.remove(&owner_id) {
                     if state.original_capital == index {
-                        if let Some(faction) = self.factions.iter_mut().find(|f| f.faction_id == owner_id) {
+                        if let Some(faction) =
+                            self.factions.iter_mut().find(|f| f.faction_id == owner_id)
+                        {
                             faction.capital_cell = state.original_capital;
                         }
                         self.atlas_notifications.push(AtlasNotificationEvent {
@@ -638,10 +822,14 @@ impl Simulation {
     /// Apply a custom nation's requested starting location before the match
     /// becomes interactive. This changes only the human seed, keeps the same
     /// compact-core size, and rejects water/occupied destinations explicitly.
-    pub fn relocate_faction_start(&mut self, faction_id: u8, requested_cell: u32) -> Result<(), String> {
+    pub fn relocate_faction_start(
+        &mut self,
+        faction_id: u8,
+        requested_cell: u32,
+    ) -> Result<(), String> {
         let base_x = (requested_cell as usize % WORLD_WIDTH) as i32;
         let base_y = (requested_cell as usize / WORLD_WIDTH) as i32;
-        
+
         let mut candidates = Vec::new();
         for dy in -12..=12 {
             for dx in -18..=18 {
@@ -649,13 +837,15 @@ impl Simulation {
                 let ny = base_y + dy;
                 if ny >= 0 && (ny as usize) < WORLD_HEIGHT {
                     let idx = ny as usize * WORLD_WIDTH + nx;
-                    if self.cells[idx].terrain_type == 0 && (self.cells[idx].owner_id == 0 || self.cells[idx].owner_id == faction_id) {
+                    if self.cells[idx].terrain_type == 0
+                        && (self.cells[idx].owner_id == 0 || self.cells[idx].owner_id == faction_id)
+                    {
                         candidates.push(idx as u32);
                     }
                 }
             }
         }
-        
+
         let chosen_start = if !candidates.is_empty() {
             use rand::seq::SliceRandom;
             let mut rng = rand::thread_rng();
@@ -668,7 +858,11 @@ impl Simulation {
         if target >= self.cells.len() || self.cells[target].terrain_type == 2 {
             return Err("starting_location_water".to_string());
         }
-        let Some(faction_index) = self.factions.iter().position(|f| f.faction_id == faction_id) else {
+        let Some(faction_index) = self
+            .factions
+            .iter()
+            .position(|f| f.faction_id == faction_id)
+        else {
             return Err("invalid_faction".to_string());
         };
         // 1. Clear old ownership of this faction
@@ -716,29 +910,75 @@ impl Simulation {
         self.factions
             .iter()
             .find(|f| f.faction_id == faction_id)
-            .map(|f| (
-                f.doctrine_offense as f64,
-                f.doctrine_defense as f64,
-                f.doctrine_expansion as f64,
-                f.doctrine_maritime as f64,
-            ))
+            .map(|f| {
+                (
+                    f.doctrine_offense as f64,
+                    f.doctrine_defense as f64,
+                    f.doctrine_expansion as f64,
+                    f.doctrine_maritime as f64,
+                )
+            })
             .unwrap_or((0.0, 0.0, 0.0, 0.0))
     }
 
     fn best_relocation_capital(&self, faction_id: u8) -> Option<u32> {
-        self.cells
+        // Relocation must represent the surviving state, not whichever tiny
+        // remnant happens to contain the densest 2x2 block. Select the largest
+        // canonical land-connected component first, then place the provisional
+        // capital at its most sheltered, locally supported cell.
+        let mut unseen: HashSet<usize> = self
+            .cells
             .iter()
             .enumerate()
-            .filter(|(_, cell)| cell.owner_id == faction_id && cell.terrain_type == 0)
-            .map(|(index, _)| {
+            .filter_map(|(index, cell)| {
+                (cell.owner_id == faction_id && cell.terrain_type == 0).then_some(index)
+            })
+            .collect();
+        let mut largest_component = Vec::new();
+        while let Some(&seed) = unseen.iter().next() {
+            let mut component = Vec::new();
+            let mut queue = VecDeque::from([seed]);
+            unseen.remove(&seed);
+            while let Some(index) = queue.pop_front() {
+                component.push(index);
+                for neighbor in crate::expansion::legal_land_neighbors(&self.cells, index) {
+                    if self.cells[neighbor].owner_id == faction_id && unseen.remove(&neighbor) {
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+            if component.len() > largest_component.len()
+                || (component.len() == largest_component.len()
+                    && component.iter().min() < largest_component.iter().min())
+            {
+                largest_component = component;
+            }
+        }
+
+        let component_set: HashSet<usize> = largest_component.iter().copied().collect();
+        largest_component
+            .into_iter()
+            .map(|index| {
                 let friendly_neighbors = Self::cardinal(index)
                     .into_iter()
-                    .filter(|&neighbor| self.cells[neighbor].owner_id == faction_id)
+                    .filter(|neighbor| component_set.contains(neighbor))
                     .count();
-                (friendly_neighbors, std::cmp::Reverse(index), index as u32)
+                let hostile_neighbors = Self::cardinal(index)
+                    .into_iter()
+                    .filter(|&neighbor| {
+                        let owner = self.cells[neighbor].owner_id;
+                        owner > 0 && owner != faction_id
+                    })
+                    .count();
+                (
+                    friendly_neighbors,
+                    std::cmp::Reverse(hostile_neighbors),
+                    std::cmp::Reverse(index),
+                    index as u32,
+                )
             })
             .max()
-            .map(|(_, _, index)| index)
+            .map(|(_, _, _, index)| index)
     }
 
     pub fn advance_government_relocations(&mut self, dt_seconds: f64) {
@@ -758,7 +998,11 @@ impl Simulation {
 
         for (faction_id, orig_cap) in canceled {
             self.relocation_states.remove(&faction_id);
-            if let Some(f) = self.factions.iter_mut().find(|f| f.faction_id == faction_id) {
+            if let Some(f) = self
+                .factions
+                .iter_mut()
+                .find(|f| f.faction_id == faction_id)
+            {
                 f.capital_cell = orig_cap;
             }
             self.atlas_notifications.push(AtlasNotificationEvent {
@@ -773,7 +1017,11 @@ impl Simulation {
             self.relocation_states.remove(&faction_id);
             if let Some(new_cap) = self.best_relocation_capital(faction_id) {
                 self.capital_relocations_count += 1;
-                if let Some(f) = self.factions.iter_mut().find(|f| f.faction_id == faction_id) {
+                if let Some(f) = self
+                    .factions
+                    .iter_mut()
+                    .find(|f| f.faction_id == faction_id)
+                {
                     f.capital_cell = new_cap;
                 }
                 self.atlas_notifications.push(AtlasNotificationEvent {
@@ -797,21 +1045,29 @@ impl Simulation {
             let fid = faction.faction_id;
             let base_capital = faction.capital_cell as usize;
             let capital = if self.relocation_states.contains_key(&fid) {
-                self.best_relocation_capital(fid).map(|c| c as usize).unwrap_or(base_capital)
+                self.best_relocation_capital(fid)
+                    .map(|c| c as usize)
+                    .unwrap_or(base_capital)
             } else {
                 base_capital
             };
 
             queue.clear();
 
-            if capital < TOTAL_CELLS && self.cells[capital].owner_id == fid && self.cells[capital].terrain_type == 0 {
+            if capital < TOTAL_CELLS
+                && self.cells[capital].owner_id == fid
+                && self.cells[capital].terrain_type == 0
+            {
                 self.cell_supply[capital] = 1;
                 queue.push_back(capital);
             }
 
             for &port in &self.built_ports {
                 let p = port as usize;
-                if p < TOTAL_CELLS && self.cells[p].owner_id == fid && self.cells[p].terrain_type == 0 {
+                if p < TOTAL_CELLS
+                    && self.cells[p].owner_id == fid
+                    && self.cells[p].terrain_type == 0
+                {
                     if self.cell_supply[p] == 0 {
                         self.cell_supply[p] = 1;
                         queue.push_back(p);
@@ -821,7 +1077,9 @@ impl Simulation {
 
             while let Some(curr) = queue.pop_front() {
                 for neighbor in Self::cardinal(curr) {
-                    if self.cells[neighbor].terrain_type == 0 && self.cells[neighbor].owner_id == fid {
+                    if self.cells[neighbor].terrain_type == 0
+                        && self.cells[neighbor].owner_id == fid
+                    {
                         if self.cell_supply[neighbor] == 0 {
                             self.cell_supply[neighbor] = 1;
                             queue.push_back(neighbor);
@@ -834,7 +1092,10 @@ impl Simulation {
 
     pub fn is_cell_land_connected_to_capital(&self, faction_id: u8, cell: u32) -> bool {
         let start = cell as usize;
-        if start >= TOTAL_CELLS || self.cells[start].owner_id != faction_id || self.cells[start].terrain_type != 0 {
+        if start >= TOTAL_CELLS
+            || self.cells[start].owner_id != faction_id
+            || self.cells[start].terrain_type != 0
+        {
             return false;
         }
 
@@ -843,7 +1104,9 @@ impl Simulation {
             _ => return false,
         };
         let capital = if self.relocation_states.contains_key(&faction_id) {
-            self.best_relocation_capital(faction_id).map(|c| c as usize).unwrap_or(base_capital)
+            self.best_relocation_capital(faction_id)
+                .map(|c| c as usize)
+                .unwrap_or(base_capital)
         } else {
             base_capital
         };
@@ -883,7 +1146,9 @@ impl Simulation {
             return true;
         }
 
-        if self.built_ports.contains(&(start as u32)) && self.built_ports.contains(&(capital as u32)) {
+        if self.built_ports.contains(&(start as u32))
+            && self.built_ports.contains(&(capital as u32))
+        {
             return true;
         }
 
@@ -891,7 +1156,11 @@ impl Simulation {
     }
 
     fn eliminate_faction(&mut self, faction_id: u8) {
-        let Some(faction_index) = self.factions.iter().position(|f| f.faction_id == faction_id) else {
+        let Some(faction_index) = self
+            .factions
+            .iter()
+            .position(|f| f.faction_id == faction_id)
+        else {
             return;
         };
         if self.factions[faction_index].is_eliminated {
@@ -922,11 +1191,16 @@ impl Simulation {
                 };
             }
         }
-        self.defense_foci.retain(|focus| focus.faction_id != faction_id);
-        self.port_constructions.retain(|port| port.builder != faction_id);
-        self.built_ports.retain(|cell| self.cells[*cell as usize].owner_id != faction_id);
-        self.alliances.retain(|(a, b)| *a != faction_id && *b != faction_id);
-        self.pending_alliances.retain(|proposal| proposal.proposer != faction_id && proposal.target != faction_id);
+        self.defense_foci
+            .retain(|focus| focus.faction_id != faction_id);
+        self.port_constructions
+            .retain(|port| port.builder != faction_id);
+        self.built_ports
+            .retain(|cell| self.cells[*cell as usize].owner_id != faction_id);
+        self.alliances
+            .retain(|(a, b)| *a != faction_id && *b != faction_id);
+        self.pending_alliances
+            .retain(|proposal| proposal.proposer != faction_id && proposal.target != faction_id);
         let faction = &mut self.factions[faction_index];
         faction.is_eliminated = true;
         faction.population = 0.0;
@@ -940,7 +1214,11 @@ impl Simulation {
         if self.first_elimination_tick.is_none() {
             self.first_elimination_tick = Some(self.tick);
         }
-        let alive_count = self.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
+        let alive_count = self
+            .factions
+            .iter()
+            .filter(|f| !f.is_eliminated && f.territory_count > 0)
+            .count();
         if alive_count <= 22 && self.half_field_tick.is_none() {
             self.half_field_tick = Some(self.tick);
         }
@@ -971,7 +1249,13 @@ impl Simulation {
             let mut frontier = vec![alive[0]];
             while let Some(member) = frontier.pop() {
                 for &(a, b) in &self.alliances {
-                    let next = if a == member { Some(b) } else if b == member { Some(a) } else { None };
+                    let next = if a == member {
+                        Some(b)
+                    } else if b == member {
+                        Some(a)
+                    } else {
+                        None
+                    };
                     if let Some(next) = next {
                         if alive.contains(&next) && seen.insert(next) {
                             frontier.push(next);
@@ -990,7 +1274,10 @@ impl Simulation {
         }
 
         // 3. Domination victory: One faction controls >= 65% of all currently inhabited land
-        if self.macro_phase == MacroPhase::WarEra || self.macro_phase == MacroPhase::Endgame || self.tick > 4000 {
+        if self.macro_phase == MacroPhase::WarEra
+            || self.macro_phase == MacroPhase::Endgame
+            || self.tick > 4000
+        {
             let total_inhabited: u32 = self.factions.iter().map(|f| f.territory_count).sum();
             if total_inhabited > 60 {
                 for &fid in &alive {
@@ -1009,11 +1296,16 @@ impl Simulation {
 
     pub fn resolve_expansion_anchor(&self, faction_id: u8, requested_target: u32) -> Option<u32> {
         let start_idx = requested_target as usize;
-        if start_idx >= TOTAL_CELLS || self.cells[start_idx].terrain_type == 2 || self.cells[start_idx].owner_id != 0 {
+        if start_idx >= TOTAL_CELLS
+            || self.cells[start_idx].terrain_type == 2
+            || self.cells[start_idx].owner_id != 0
+        {
             return None;
         }
 
-        let capital = self.factions.iter()
+        let capital = self
+            .factions
+            .iter()
             .find(|f| f.faction_id == faction_id)
             .map(|f| f.capital_cell as usize)
             .unwrap_or(0);
@@ -1022,7 +1314,7 @@ impl Simulation {
         let cap_y = (capital / WORLD_WIDTH) as f64;
         let target_x = (start_idx % WORLD_WIDTH) as f64;
         let target_y = (start_idx / WORLD_WIDTH) as f64;
-        
+
         // Base direction from capital to target
         let dir_x = target_x - cap_x;
         let dir_y = target_y - cap_y;
@@ -1035,7 +1327,7 @@ impl Simulation {
 
         let mut visited = HashSet::new();
         let mut q = VecDeque::new();
-        
+
         q.push_back((start_idx, 0));
         visited.insert(start_idx);
 
@@ -1044,7 +1336,9 @@ impl Simulation {
 
         while let Some((curr, dist)) = q.pop_front() {
             max_steps -= 1;
-            if max_steps == 0 { break; }
+            if max_steps == 0 {
+                break;
+            }
 
             let mut is_frontier = false;
             for n in Self::cardinal(curr) {
@@ -1057,10 +1351,12 @@ impl Simulation {
             if is_frontier {
                 let curr_x = (curr % WORLD_WIDTH) as f64;
                 let curr_y = (curr / WORLD_WIDTH) as f64;
-                
+
                 // Euclidean distance to target
                 let mut dx = (curr_x - target_x).abs();
-                if dx > 512.0 { dx = 1024.0 - dx; }
+                if dx > 512.0 {
+                    dx = 1024.0 - dx;
+                }
                 let dy = (curr_y - target_y).abs();
                 let eucl_dist = (dx * dx + dy * dy).sqrt();
 
@@ -1075,7 +1371,7 @@ impl Simulation {
                 } else {
                     1.0
                 };
-                
+
                 // Score intent alignment (lower penalty is better)
                 let alignment_penalty = (1.0 - dot) * 50.0 + (dist as f64 * 0.1);
 
@@ -1161,7 +1457,8 @@ impl Simulation {
         let effective_budget = commit_budget / expansion_cost_multiplier;
 
         let requested = if mode == "FRONTIER" {
-            crate::expansion::cells_for_commitment(effective_budget).min(48)
+            crate::expansion::cells_for_commitment(effective_budget)
+                .min(crate::balance::FRONTIER_MAX_CELLS_PER_OPERATION)
         } else {
             crate::expansion::cells_for_commitment(effective_budget)
         };
@@ -1194,6 +1491,17 @@ impl Simulation {
             return Err(reason.to_string());
         }
 
+        let focus_direction = if mode == "FRONTIER" {
+            None
+        } else {
+            Some(crate::expansion::focus_direction_for_anchor(
+                &self.cells,
+                faction_id,
+                expansion_patch.anchor_cell as usize,
+                target_cell as usize,
+            ))
+        };
+
         let mut patch = PatchResult {
             actual_size: expansion_patch.cells.len(),
             cells: expansion_patch.cells,
@@ -1213,21 +1521,61 @@ impl Simulation {
         let holes = self.find_enclosed_neutral_holes(faction_id, &patch.cells, hole_budget);
         if !holes.is_empty() {
             patch.cells.extend(holes);
-            patch.cells.sort_unstable();
-            patch.cells.dedup();
-            patch.actual_size = patch.cells.len();
+        }
+
+        // Re-run the canonical topological ordering after every filter and
+        // cavity fill. This is intentionally before population is committed:
+        // every accepted cell must have a legal parent in the sovereign grid
+        // or an earlier accepted cell.
+        if let Some((direction_origin, ux, uy)) = focus_direction {
+            crate::expansion::sort_focus_patch_topologically(
+                &self.cells,
+                faction_id,
+                resolved_anchor,
+                direction_origin as u32,
+                ux,
+                uy,
+                &mut patch.cells,
+            );
+        } else {
+            crate::expansion::sort_patch_topologically(
+                &self.cells,
+                faction_id,
+                resolved_anchor,
+                &mut patch.cells,
+            );
+        }
+        patch.cells.dedup();
+        patch.actual_size = patch.cells.len();
+        if patch.cells.is_empty() || !self.patch_is_connected_to_owner(faction_id, &patch.cells) {
+            return Err("disconnected_patch_rejected".to_string());
         }
 
         // Operation starts: committed population is permanently spent
-        if let Some(fac) = self.factions.iter_mut().find(|f| f.faction_id == faction_id) {
+        if let Some(fac) = self
+            .factions
+            .iter_mut()
+            .find(|f| f.faction_id == faction_id)
+        {
             fac.population = (fac.population - commit_budget).max(0.0);
-            fac.total_living_population = (fac.total_living_population - commit_budget).max(fac.population + fac.deployed_population);
+            fac.total_living_population = (fac.total_living_population - commit_budget)
+                .max(fac.population + fac.deployed_population);
         }
 
         let mut first_contact = None;
-        let mut had_sea_before = self.factions.iter().find(|f| f.faction_id == faction_id).map(|f| f.ports_count > 0).unwrap_or(false);
+        let mut had_sea_before = self
+            .factions
+            .iter()
+            .find(|f| f.faction_id == faction_id)
+            .map(|f| f.ports_count > 0)
+            .unwrap_or(false);
         if !had_sea_before {
-            had_sea_before = self.cells.iter().enumerate().any(|(i, c)| c.owner_id == faction_id && Self::cardinal(i).into_iter().any(|n| self.cells[n].terrain_type == 2));
+            had_sea_before = self.cells.iter().enumerate().any(|(i, c)| {
+                c.owner_id == faction_id
+                    && Self::cardinal(i)
+                        .into_iter()
+                        .any(|n| self.cells[n].terrain_type == 2)
+            });
         }
 
         if mode == "FRONTIER" {
@@ -1244,7 +1592,8 @@ impl Simulation {
                 ];
 
                 for (nx, ny) in curr_neighbors {
-                    if nx >= 0 && nx < (WORLD_WIDTH as i32) && ny >= 0 && ny < (WORLD_HEIGHT as i32) {
+                    if nx >= 0 && nx < (WORLD_WIDTH as i32) && ny >= 0 && ny < (WORLD_HEIGHT as i32)
+                    {
                         let n_idx = (ny as usize) * WORLD_WIDTH + (nx as usize);
                         let n_owner = self.cells[n_idx].owner_id;
 
@@ -1256,7 +1605,11 @@ impl Simulation {
             }
 
             if !had_sea_before {
-                let has_sea_now = patch.cells.iter().any(|&c| Self::cardinal(c as usize).into_iter().any(|n| self.cells[n].terrain_type == 2));
+                let has_sea_now = patch.cells.iter().any(|&c| {
+                    Self::cardinal(c as usize)
+                        .into_iter()
+                        .any(|n| self.cells[n].terrain_type == 2)
+                });
                 if has_sea_now {
                     self.atlas_notifications.push(AtlasNotificationEvent {
                         event_type: "SEA_ACCESS_ESTABLISHED".to_string(),
@@ -1318,7 +1671,9 @@ impl Simulation {
             }
 
             if !had_sea_before {
-                let has_sea_now = Self::cardinal(curr).into_iter().any(|n| self.cells[n].terrain_type == 2);
+                let has_sea_now = Self::cardinal(curr)
+                    .into_iter()
+                    .any(|n| self.cells[n].terrain_type == 2);
                 if has_sea_now {
                     self.atlas_notifications.push(AtlasNotificationEvent {
                         event_type: "SEA_ACCESS_ESTABLISHED".to_string(),
@@ -1356,15 +1711,16 @@ impl Simulation {
 
             if patch.cells.len() > 1 {
                 self.next_expansion_id += 1;
-                self.pending_expansion_advances.push(PendingExpansionAdvance {
-                    expansion_id: self.next_expansion_id,
-                    faction_id,
-                    cells: patch.cells[1..].iter().copied().collect(),
-                    elapsed: 0.0,
-                    resolved_anchor,
-                    first_contact,
-                    had_sea_before,
-                });
+                self.pending_expansion_advances
+                    .push(PendingExpansionAdvance {
+                        expansion_id: self.next_expansion_id,
+                        faction_id,
+                        cells: patch.cells[1..].iter().copied().collect(),
+                        elapsed: 0.0,
+                        resolved_anchor,
+                        first_contact,
+                        had_sea_before,
+                    });
             }
         }
 
@@ -1404,20 +1760,6 @@ impl Simulation {
         if self.match_over {
             return Err("match_finished".to_string());
         }
-        if self.macro_phase != MacroPhase::WarEra && self.macro_phase != MacroPhase::Endgame {
-            if attacker == crate::balance::HUMAN_FACTION_ID {
-                self.macro_phase = MacroPhase::WarEra;
-                self.macro_phase_timer = 0.0;
-                self.atlas_notifications.push(AtlasNotificationEvent {
-                    event_type: "WAR_ERA_BEGINS".to_string(),
-                    message: "WAR ERA BEGINS".to_string(),
-                    faction_id: Some(attacker),
-                    cell_index: Some(target),
-                });
-            } else {
-                return Err("war_not_available".to_string());
-            }
-        }
         if !self.is_faction_alive(attacker) {
             return Err("attacker_eliminated".to_string());
         }
@@ -1427,10 +1769,7 @@ impl Simulation {
             return Err("invalid_source".to_string());
         }
         let defender = self.cells[t].owner_id;
-        if defender == 0
-            || defender == attacker
-            || self.cells[t].terrain_type == 2
-        {
+        if defender == 0 || defender == attacker || self.cells[t].terrain_type == 2 {
             return Err("invalid_target".to_string());
         }
         if !self.is_faction_alive(defender) {
@@ -1450,11 +1789,19 @@ impl Simulation {
         {
             return Err("invalid_attack_intent".to_string());
         }
-        // Repeated orders along the same short, connected local frontier
-        // reinforce its existing ledger. Distant fronts remain independent.
+        // A local contact starts a local war, not a global freeze of peaceful
+        // frontier orders. The macro era closes only from measured world
+        // occupancy in `advance_macro_phase`.
+        // Repeated or reverse orders along the same short, connected local
+        // frontier reinforce the one contested front. Distant theatres remain
+        // independent, but A->B followed by B->A must never create two
+        // overlapping battles painting through each other.
         if let Some(front_id) = self.nearby_land_operation(attacker, defender, target) {
             let deployed_population = self.reinforce_front(attacker, front_id, commit_percent)?;
-            return Ok(AttackOrderOutcome { front_id, deployed_population });
+            return Ok(AttackOrderOutcome {
+                front_id,
+                deployed_population,
+            });
         }
         let Some(fi) = self.factions.iter().position(|f| f.faction_id == attacker) else {
             return Err("invalid_attacker".to_string());
@@ -1498,12 +1845,13 @@ impl Simulation {
         // used first, then a small emergency response is drawn from the
         // defender's uncommitted population. No regional defense scalar is
         // created and the same person is never deducted twice.
-        let focus_population = self.available_local_defense_population(defender, target);
+        let focus_population = self.take_local_defense_population(defender, target);
         let shared_local_force = self.active_local_offensive_population(defender, target);
         let is_target_isolated = !self.is_cell_land_connected_to_capital(defender, target);
         let consolidation = self.cell_consolidation[target as usize];
         let consolidation_defense = (consolidation as f64).clamp(0.20, 1.0);
-        let emergency = if focus_population > 0.0 || shared_local_force > 0.0 || is_target_isolated {
+        let emergency = if focus_population > 0.0 || shared_local_force > 0.0 || is_target_isolated
+        {
             0.0
         } else {
             self.factions[di].population * 0.075 * consolidation_defense
@@ -1526,46 +1874,86 @@ impl Simulation {
             self.tick,
             "LAND_OFFENSIVE",
         );
-        if let Some(front) = self.combat_manager.fronts.iter_mut().find(|front| front.front_id == front_id) {
+        if let Some(front) = self
+            .combat_manager
+            .fronts
+            .iter_mut()
+            .find(|front| front.front_id == front_id)
+        {
             front.shared_local_force_population = shared_local_force;
         }
         self.wars_started += 1;
         if self.first_war_tick.is_none() {
             self.first_war_tick = Some(self.tick);
-            self.neutral_land_remaining_at_first_war = self.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count();
+            self.neutral_land_remaining_at_first_war = self
+                .cells
+                .iter()
+                .filter(|c| c.terrain_type == 0 && c.owner_id == 0)
+                .count();
         }
         self.refresh_all_economies();
-        Ok(AttackOrderOutcome { front_id, deployed_population: committed })
+        Ok(AttackOrderOutcome {
+            front_id,
+            deployed_population: committed,
+        })
     }
 
     /// Commit additional real Population to an already active offensive. The
     /// order is independent per front, so a faction can reinforce several
     /// simultaneous operations without a generic army ledger.
-    fn nearby_land_operation(&self, attacker: u8, defender: u8, target: u32) -> Option<u32> {
+    fn nearby_land_operation(&mut self, attacker: u8, defender: u8, target: u32) -> Option<u32> {
+        let traversal_started = Instant::now();
+        let mut matching_ns = 0_u128;
         let mut queue = std::collections::VecDeque::from([(target, 0_u8)]);
         let mut seen = std::collections::HashSet::from([target]);
         let mut best: Option<(u8, u32)> = None;
         while let Some((cell, distance)) = queue.pop_front() {
+            let matching_started = Instant::now();
             for front in &self.combat_manager.fronts {
-                if !front.is_combat_active || front.attacker_faction != attacker
+                if !front.is_combat_active
                     || front.operation_kind != "LAND_OFFENSIVE"
-                    || (front.faction_a != defender && front.faction_b != defender) { continue; }
-                let boundary = if front.faction_a == attacker { &front.border_cells_b } else { &front.border_cells_a };
+                    || !((front.faction_a == attacker && front.faction_b == defender)
+                        || (front.faction_a == defender && front.faction_b == attacker))
+                {
+                    continue;
+                }
+                let boundary = if front.faction_a == attacker {
+                    &front.border_cells_b
+                } else {
+                    &front.border_cells_a
+                };
                 if boundary.contains(&cell) || front.target_cell_index == cell {
                     let candidate = (distance, front.front_id);
-                    if best.is_none_or(|previous| candidate < previous) { best = Some(candidate); }
+                    if best.is_none_or(|previous| candidate < previous) {
+                        best = Some(candidate);
+                    }
                 }
             }
-            if distance >= 3 { continue; }
+            matching_ns += matching_started.elapsed().as_nanos();
+            if distance >= 3 {
+                continue;
+            }
             for next in Self::cardinal(cell as usize) {
                 // Never merge across water, neutral land, a third country,
                 // or an enemy interior shortcut unrelated to this frontier.
-                if self.cells[next].terrain_type != 0 || self.cells[next].owner_id != defender
-                    || !Self::cardinal(next).into_iter().any(|own| self.cells[own].terrain_type == 0 && self.cells[own].owner_id == attacker)
-                    || !seen.insert(next as u32) { continue; }
+                if self.cells[next].terrain_type != 0
+                    || self.cells[next].owner_id != defender
+                    || !Self::cardinal(next).into_iter().any(|own| {
+                        self.cells[own].terrain_type == 0 && self.cells[own].owner_id == attacker
+                    })
+                    || !seen.insert(next as u32)
+                {
+                    continue;
+                }
                 queue.push_back((next as u32, distance + 1));
             }
         }
+        self.profile_front_match_ns += matching_ns;
+        self.profile_theatre_traversal_ns += traversal_started
+            .elapsed()
+            .as_nanos()
+            .saturating_sub(matching_ns);
+        self.profile_front_match_calls += 1;
         best.map(|(_, id)| id)
     }
 
@@ -1575,27 +1963,72 @@ impl Simulation {
         front_id: u32,
         commit_percent: f64,
     ) -> Result<f64, String> {
-        let Some(front_index) = self.combat_manager.fronts.iter().position(|front| front.front_id == front_id) else {
+        let Some(front_index) = self
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == front_id)
+        else {
             return Err("front_not_found".to_string());
         };
         let front = &self.combat_manager.fronts[front_index];
-        if !front.is_combat_active { return Err("front_not_active".to_string()); }
-        if front.attacker_faction != attacker { return Err("not_front_attacker".to_string()); }
-        if front.operation_kind == "LAND_OFFENSIVE" && !self.is_cell_land_connected_to_capital(attacker, front.source_cell_index) {
+        if !front.is_combat_active {
+            return Err("front_not_active".to_string());
+        }
+        if front.faction_a != attacker && front.faction_b != attacker {
+            return Err("not_front_participant".to_string());
+        }
+        let support_cell = if front.faction_a == attacker {
+            front
+                .border_cells_a
+                .iter()
+                .copied()
+                .find(|cell| self.cells[*cell as usize].owner_id == attacker)
+                .or_else(|| {
+                    (self.cells[front.source_cell_index as usize].owner_id == attacker)
+                        .then_some(front.source_cell_index)
+                })
+                .or_else(|| {
+                    (self.cells[front.target_cell_index as usize].owner_id == attacker)
+                        .then_some(front.target_cell_index)
+                })
+        } else {
+            front
+                .border_cells_b
+                .iter()
+                .copied()
+                .find(|cell| self.cells[*cell as usize].owner_id == attacker)
+                .or_else(|| {
+                    (self.cells[front.target_cell_index as usize].owner_id == attacker)
+                        .then_some(front.target_cell_index)
+                })
+                .or_else(|| {
+                    (self.cells[front.source_cell_index as usize].owner_id == attacker)
+                        .then_some(front.source_cell_index)
+                })
+        }
+        .ok_or_else(|| "no_shared_front".to_string())?;
+        if front.operation_kind == "LAND_OFFENSIVE"
+            && !self.is_cell_land_connected_to_capital(attacker, support_cell)
+        {
             return Err("pocket_isolated".to_string());
         }
         let Some(fi) = self.factions.iter().position(|f| f.faction_id == attacker) else {
             return Err("invalid_attacker".to_string());
         };
-        let committed = (self.factions[fi].population * commit_percent.clamp(0.0, 1.0)).min(self.factions[fi].population);
-        if committed <= 0.0 || self.factions[fi].population <= 0.0 { return Err("insufficient_population".to_string()); }
+        let committed = (self.factions[fi].population * commit_percent.clamp(0.0, 1.0))
+            .min(self.factions[fi].population);
+        if committed <= 0.0 || self.factions[fi].population <= 0.0 {
+            return Err("insufficient_population".to_string());
+        }
         self.factions[fi].population -= committed;
         let front = &mut self.combat_manager.fronts[front_index];
-        if front.attacker_faction == front.faction_a {
+        if front.faction_a == attacker {
             front.deployed_population_a += committed;
         } else {
             front.deployed_population_b += committed;
         }
+        front.survivors_returned = false;
         self.refresh_all_economies();
         Ok(committed)
     }
@@ -1606,33 +2039,26 @@ impl Simulation {
             .filter(|focus| {
                 focus.faction_id == faction_id
                     && (focus.cell_index == target
-                        || Self::cardinal(focus.cell_index as usize)
-                            .contains(&(target as usize)))
+                        || Self::cardinal(focus.cell_index as usize).contains(&(target as usize)))
             })
             .map(|focus| focus.deployed_population)
             .sum()
     }
 
-    fn available_local_defense_population(&self, faction_id: u8, target: u32) -> f64 {
-        let committed_focus: f64 = self
-            .combat_manager
-            .fronts
-            .iter()
-            .filter(|front| front.is_combat_active)
-            .filter_map(|front| {
-                let defender = if front.attacker_faction == front.faction_a {
-                    front.faction_b
-                } else {
-                    front.faction_a
-                };
-                (defender == faction_id
-                    && (front.target_cell_index == target
-                        || Self::cardinal(front.target_cell_index as usize)
-                            .contains(&(target as usize))))
-                    .then_some(front.defense_focus_population)
-            })
-            .sum();
-        (self.local_defense_population(faction_id, target) - committed_focus).max(0.0)
+    fn take_local_defense_population(&mut self, faction_id: u8, target: u32) -> f64 {
+        let mut committed = 0.0;
+        self.defense_foci.retain(|focus| {
+            let local = focus.faction_id == faction_id
+                && (focus.cell_index == target
+                    || Self::cardinal(focus.cell_index as usize).contains(&(target as usize)));
+            if local {
+                committed += focus.deployed_population;
+                false
+            } else {
+                true
+            }
+        });
+        committed
     }
 
     fn active_local_offensive_population(&self, faction_id: u8, target: u32) -> f64 {
@@ -1640,8 +2066,17 @@ impl Simulation {
             .fronts
             .iter()
             .filter(|front| front.is_combat_active && front.attacker_faction == faction_id)
-            .filter(|front| front.target_cell_index == target || Self::cardinal(front.target_cell_index as usize).contains(&(target as usize)))
-            .map(|front| if front.faction_a == faction_id { front.deployed_population_a } else { front.deployed_population_b })
+            .filter(|front| {
+                front.target_cell_index == target
+                    || Self::cardinal(front.target_cell_index as usize).contains(&(target as usize))
+            })
+            .map(|front| {
+                if front.faction_a == faction_id {
+                    front.deployed_population_a
+                } else {
+                    front.deployed_population_b
+                }
+            })
             .sum()
     }
 
@@ -1670,59 +2105,111 @@ impl Simulation {
         if amount < MIN_DEFENSE_FOCUS {
             return Err("defense_focus_too_small".to_string());
         }
-        let Some(fi) = self.factions.iter().position(|f| f.faction_id == faction_id) else {
+        let Some(fi) = self
+            .factions
+            .iter()
+            .position(|f| f.faction_id == faction_id)
+        else {
             return Err("invalid_faction".to_string());
         };
         if self.factions[fi].population < amount {
             return Err("insufficient_population".to_string());
         }
-        if let Some(existing_index) = self.defense_foci.iter().position(|f| f.faction_id == faction_id && f.cell_index == cell_index) {
-            let existing = self.defense_foci.remove(existing_index);
-            self.factions[fi].population += existing.deployed_population;
+        if let Some(existing_index) = self
+            .defense_foci
+            .iter()
+            .position(|f| f.faction_id == faction_id && f.cell_index == cell_index)
+        {
+            self.defense_foci[existing_index].deployed_population += amount;
+        } else {
+            self.defense_foci.push(DefenseFocus {
+                faction_id,
+                cell_index,
+                deployed_population: amount,
+            });
         }
         self.factions[fi].population -= amount;
-        self.defense_foci.push(DefenseFocus { faction_id, cell_index, deployed_population: amount });
         self.refresh_all_economies();
         Ok(amount)
     }
 
-    pub fn release_defense_focus(&mut self, faction_id: u8, cell_index: u32) -> Result<f64, String> {
-        let Some(pos) = self.defense_foci.iter().position(|f| f.faction_id == faction_id && f.cell_index == cell_index) else {
+    pub fn release_defense_focus(
+        &mut self,
+        faction_id: u8,
+        cell_index: u32,
+    ) -> Result<f64, String> {
+        let Some(pos) = self
+            .defense_foci
+            .iter()
+            .position(|f| f.faction_id == faction_id && f.cell_index == cell_index)
+        else {
             return Err("defense_focus_not_found".to_string());
         };
         let focus = self.defense_foci.remove(pos);
-        if let Some(faction) = self.factions.iter_mut().find(|f| f.faction_id == faction_id) {
-            faction.population += focus.deployed_population;
-        }
+        // Releasing a position removes its pressure; it does not refund the
+        // Population that was permanently committed there.
         self.refresh_all_economies();
         Ok(focus.deployed_population)
     }
 
     pub fn build_port(&mut self, faction_id: u8, cell_index: u32) -> Result<f64, String> {
         let idx = cell_index as usize;
-        if !self.is_faction_alive(faction_id) { return Err("faction_eliminated".to_string()); }
-        if idx >= self.cells.len() || self.cells[idx].owner_id != faction_id || self.cells[idx].terrain_type != 0 {
+        if !self.is_faction_alive(faction_id) {
+            return Err("faction_eliminated".to_string());
+        }
+        if idx >= self.cells.len()
+            || self.cells[idx].owner_id != faction_id
+            || self.cells[idx].terrain_type != 0
+        {
             return Err("port_point_not_owned".to_string());
         }
-        let valid_site = self.strategic_sites.iter().any(|site| site.kind == "PORT" && site.cell_a == cell_index);
-        let coastal = Self::cardinal(idx).into_iter().any(|n| self.cells[n].terrain_type == 2);
-        if !valid_site || !coastal { return Err("not_valid_coast".to_string()); }
-        if self.built_ports.contains(&cell_index) || self.port_constructions.iter().any(|p| p.cell_index == cell_index) {
+        let valid_site = self
+            .strategic_sites
+            .iter()
+            .any(|site| site.kind == "PORT" && site.cell_a == cell_index);
+        let coastal = Self::cardinal(idx)
+            .into_iter()
+            .any(|n| self.cells[n].terrain_type == 2);
+        if !valid_site || !coastal {
+            return Err("not_valid_coast".to_string());
+        }
+        if self.built_ports.contains(&cell_index)
+            || self
+                .port_constructions
+                .iter()
+                .any(|p| p.cell_index == cell_index)
+        {
             return Err("port_already_exists".to_string());
         }
-        let Some(fi) = self.factions.iter().position(|f| f.faction_id == faction_id) else { return Err("invalid_faction".to_string()); };
+        let Some(fi) = self
+            .factions
+            .iter()
+            .position(|f| f.faction_id == faction_id)
+        else {
+            return Err("invalid_faction".to_string());
+        };
         let (_, _, _, maritime) = self.doctrine_for(faction_id);
         let population_cost = PORT_POPULATION_COST * (1.0 - maritime * 0.8).clamp(0.95, 1.05);
-        if self.factions[fi].population < population_cost { return Err("insufficient_population".to_string()); }
+        if self.factions[fi].population < population_cost {
+            return Err("insufficient_population".to_string());
+        }
         self.factions[fi].population -= population_cost;
-        self.port_constructions.push(PortConstruction { cell_index, builder: faction_id, remaining_seconds: 10.0 });
+        self.port_constructions.push(PortConstruction {
+            cell_index,
+            builder: faction_id,
+            remaining_seconds: 10.0,
+        });
         self.refresh_all_economies();
         Ok(population_cost)
     }
 
     pub fn is_coastal_cell(&self, cell_index: u32) -> bool {
         let idx = cell_index as usize;
-        idx < self.cells.len() && self.cells[idx].terrain_type == 0 && Self::cardinal(idx).into_iter().any(|n| self.cells[n].terrain_type == 2)
+        idx < self.cells.len()
+            && self.cells[idx].terrain_type == 0
+            && Self::cardinal(idx)
+                .into_iter()
+                .any(|n| self.cells[n].terrain_type == 2)
     }
 
     pub fn process_amphibious_operation(
@@ -1732,66 +2219,88 @@ impl Simulation {
         target_cell_index: u32,
         commit_percent: f64,
     ) -> Result<AttackOrderOutcome, String> {
-        if self.match_over || !self.is_faction_alive(attacker) { return Err("faction_eliminated".to_string()); }
+        if self.match_over || !self.is_faction_alive(attacker) {
+            return Err("faction_eliminated".to_string());
+        }
         let target = target_cell_index as usize;
         let port = port_cell_index as usize;
-        if port >= self.cells.len() || self.cells[port].terrain_type != 0 || self.cells[port].owner_id != attacker || !self.is_coastal_cell(port_cell_index) {
+        if port >= self.cells.len()
+            || self.cells[port].terrain_type != 0
+            || self.cells[port].owner_id != attacker
+            || !self.is_coastal_cell(port_cell_index)
+        {
             return Err("amphibious_embarkation_not_coastal".to_string());
         }
-        if target >= self.cells.len() || self.cells[target].terrain_type != 0 || self.cells[target].owner_id == attacker {
+        if target >= self.cells.len() || self.cells[target].terrain_type != 0 {
             return Err("invalid_amphibious_target".to_string());
         }
-        if !self.is_coastal_cell(target_cell_index) { return Err("target_not_coastal".to_string()); }
-        let defender = self.cells[target].owner_id;
-        if defender > 0 && self.macro_phase != MacroPhase::WarEra && self.macro_phase != MacroPhase::Endgame {
-            if attacker == crate::balance::HUMAN_FACTION_ID {
-                self.macro_phase = MacroPhase::WarEra;
-                self.macro_phase_timer = 0.0;
-                self.atlas_notifications.push(AtlasNotificationEvent {
-                    event_type: "WAR_ERA_BEGINS".to_string(),
-                    message: "WAR ERA BEGINS".to_string(),
-                    faction_id: Some(attacker),
-                    cell_index: Some(target_cell_index),
-                });
-            } else {
-                return Err("war_not_available".to_string());
-            }
+        if self.cells[target].owner_id != 0 {
+            return Err("hostile_cross_water_not_supported".to_string());
         }
-        if defender > 0 && !self.is_faction_alive(defender) { return Err("defender_eliminated".to_string()); }
-        if defender > 0 && self.are_allied(attacker, defender) { return Err("allied_target".to_string()); }
-        let fi = self.factions.iter().position(|f| f.faction_id == attacker).ok_or_else(|| "invalid_faction".to_string())?;
+        if !self.is_coastal_cell(target_cell_index) {
+            return Err("target_not_coastal".to_string());
+        }
+        if self.meaningful_overseas_land_mask[target] == 0 {
+            return if self.major_unseeded_land_mask[target] == 1 {
+                Err("major_landmass_not_amphibious_target".to_string())
+            } else {
+                Err("unsupported_fragment".to_string())
+            };
+        }
+        let fi = self
+            .factions
+            .iter()
+            .position(|f| f.faction_id == attacker)
+            .ok_or_else(|| "invalid_faction".to_string())?;
         let built_port = self.built_ports.contains(&port_cell_index);
+        if !built_port {
+            return Err("completed_port_required".to_string());
+        }
         let (_, _, _, maritime) = self.doctrine_for(attacker);
-        // A coastal embarkation without an established port is deliberately
-        // possible but capped to a small raiding party. A completed port is
-        // the only way to project a large population overseas.
-        let max_percent = if built_port { 1.0 } else { 0.08 };
-        let committed = self.factions[fi].population * commit_percent.clamp(0.05, max_percent);
-        if committed < MIN_ATTACK_DEPLOYMENT { return Err("insufficient_population".to_string()); }
+        let committed = self.factions[fi].population * commit_percent.clamp(0.05, 1.0);
+        if committed < MIN_ATTACK_DEPLOYMENT {
+            return Err("insufficient_population".to_string());
+        }
         self.factions[fi].population -= committed;
-        let (focus, emergency) = if defender > 0 {
-            let di = self.factions.iter().position(|f| f.faction_id == defender).ok_or_else(|| "invalid_defender".to_string())?;
-            let focus = self.available_local_defense_population(defender, target_cell_index);
-            let emergency = if focus > 0.0 { 0.0 } else { self.factions[di].population * 0.075 };
-            self.factions[di].population -= emergency;
-            (focus, emergency)
-        } else { (0.0, 0.0) };
         let sx = (port % WORLD_WIDTH) as f32;
         let sy = (port / WORLD_WIDTH) as f32;
         let tx = (target % WORLD_WIDTH) as f32;
         let ty = (target / WORLD_WIDTH) as f32;
         let length = ((tx - sx).powi(2) + (ty - sy).powi(2)).sqrt().max(1.0);
         let distance_km = Self::great_circle_distance_km(port_cell_index, target_cell_index);
-        let port_bonus = if built_port { 0.10 } else { 0.0 };
-        let survival = (0.78 + maritime * 2.2 + port_bonus - distance_km / 45_000.0 * 0.40).clamp(0.35, 0.95);
+        let port_bonus = 0.10;
+        let survival =
+            (0.78 + maritime * 2.2 + port_bonus - distance_km / 45_000.0 * 0.40).clamp(0.35, 0.95);
         let landed = committed * survival;
         let sea_casualties = committed - landed;
-        let id = self.combat_manager.register_attack_operation_with_kind(attacker, defender, port_cell_index, target_cell_index, (sx + tx) * 0.5, (sy + ty) * 0.5, (tx - sx) / length, (ty - sy) / length, landed, focus + emergency, focus, self.tick, "AMPHIBIOUS");
-        if let Some(front) = self.combat_manager.fronts.iter_mut().find(|front| front.front_id == id) {
+        let id = self.combat_manager.register_attack_operation_with_kind(
+            attacker,
+            0,
+            port_cell_index,
+            target_cell_index,
+            (sx + tx) * 0.5,
+            (sy + ty) * 0.5,
+            (tx - sx) / length,
+            (ty - sy) / length,
+            landed,
+            0.0,
+            0.0,
+            self.tick,
+            "AMPHIBIOUS",
+        );
+        if let Some(front) = self
+            .combat_manager
+            .fronts
+            .iter_mut()
+            .find(|front| front.front_id == id)
+        {
             front.casualties = sea_casualties;
         }
         self.refresh_all_economies();
-        Ok(AttackOrderOutcome { front_id: id, deployed_population: landed })
+        Ok(AttackOrderOutcome {
+            front_id: id,
+            deployed_population: landed,
+        })
     }
 
     /// Great-circle distance between equirectangular cell centers. This is
@@ -1809,56 +2318,103 @@ impl Simulation {
         let (lat2, lon2) = center(b);
         let dlat = lat2 - lat1;
         let mut dlon = (lon2 - lon1).abs();
-        if dlon > std::f64::consts::PI { dlon = std::f64::consts::TAU - dlon; }
+        if dlon > std::f64::consts::PI {
+            dlon = std::f64::consts::TAU - dlon;
+        }
         let h = (dlat * 0.5).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon * 0.5).sin().powi(2);
         2.0 * EARTH_RADIUS_KM * h.sqrt().asin()
     }
 
     pub fn offer_alliance(&mut self, proposer: u8, target: u8) -> Result<u16, String> {
-        if proposer == target || !self.is_faction_alive(proposer) || !self.is_faction_alive(target) { return Err("invalid_alliance_target".to_string()); }
-        if self.are_allied(proposer, target) { return Err("already_allied".to_string()); }
+        if proposer == target || !self.is_faction_alive(proposer) || !self.is_faction_alive(target)
+        {
+            return Err("invalid_alliance_target".to_string());
+        }
+        if self.are_allied(proposer, target) {
+            return Err("already_allied".to_string());
+        }
         // No diplomacy can be used to erase an active war.
-        if self.combat_manager.fronts.iter().any(|f| f.is_combat_active && ((f.attacker_faction == proposer && (f.faction_a == target || f.faction_b == target)) || (f.attacker_faction == target && (f.faction_a == proposer || f.faction_b == proposer)))) {
+        if self.combat_manager.fronts.iter().any(|f| {
+            f.is_combat_active
+                && ((f.attacker_faction == proposer
+                    && (f.faction_a == target || f.faction_b == target))
+                    || (f.attacker_faction == target
+                        && (f.faction_a == proposer || f.faction_b == proposer)))
+        }) {
             return Err("active_hostility".to_string());
         }
         let proposal_id = self.next_alliance_proposal_id;
         self.next_alliance_proposal_id = self.next_alliance_proposal_id.wrapping_add(1).max(1);
-        if self.factions.iter().any(|f| f.faction_id == target && f.is_human) {
-            self.pending_alliances.push(PendingAlliance { proposal_id, proposer, target });
+        if self
+            .factions
+            .iter()
+            .any(|f| f.faction_id == target && f.is_human)
+        {
+            self.pending_alliances.push(PendingAlliance {
+                proposal_id,
+                proposer,
+                target,
+            });
             return Ok(proposal_id);
         }
         // Deterministic AI decision: the same pair, doctrines and world seed
         // always reaches the same accept/reject branch.
         let (_, target_defense, target_expansion, target_maritime) = self.doctrine_for(target);
         let utility = ((proposer as u16 * 37 + target as u16 * 17) % 100) as f64 / 100.0
-            + target_defense * 1.2 + target_expansion * 0.8 + target_maritime * 0.6;
-        if utility > 0.86 { return Err("ai_rejected".to_string()); }
-        let pair = if proposer < target { (proposer, target) } else { (target, proposer) };
+            + target_defense * 1.2
+            + target_expansion * 0.8
+            + target_maritime * 0.6;
+        if utility > 0.86 {
+            return Err("ai_rejected".to_string());
+        }
+        let pair = if proposer < target {
+            (proposer, target)
+        } else {
+            (target, proposer)
+        };
         self.alliances.push(pair);
         Ok(proposal_id)
     }
 
-    pub fn respond_alliance(&mut self, responder: u8, proposal_id: u16, accept: bool) -> Result<u16, String> {
-        let Some(index) = self.pending_alliances.iter().position(|proposal| proposal.proposal_id == proposal_id && proposal.target == responder) else {
+    pub fn respond_alliance(
+        &mut self,
+        responder: u8,
+        proposal_id: u16,
+        accept: bool,
+    ) -> Result<u16, String> {
+        let Some(index) = self.pending_alliances.iter().position(|proposal| {
+            proposal.proposal_id == proposal_id && proposal.target == responder
+        }) else {
             return Err("alliance_proposal_not_found".to_string());
         };
         let proposal = self.pending_alliances.remove(index);
-        if !accept { return Err("alliance_rejected".to_string()); }
-        let pair = if proposal.proposer < proposal.target { (proposal.proposer, proposal.target) } else { (proposal.target, proposal.proposer) };
+        if !accept {
+            return Err("alliance_rejected".to_string());
+        }
+        let pair = if proposal.proposer < proposal.target {
+            (proposal.proposer, proposal.target)
+        } else {
+            (proposal.target, proposal.proposer)
+        };
         self.alliances.push(pair);
         Ok(proposal_id)
     }
 
     pub fn has_pending_alliance(&self, proposal_id: u16) -> bool {
-        self.pending_alliances.iter().any(|proposal| proposal.proposal_id == proposal_id)
+        self.pending_alliances
+            .iter()
+            .any(|proposal| proposal.proposal_id == proposal_id)
     }
 
     pub fn pending_alliance_states(&self) -> Vec<AllianceProposalInfo> {
-        self.pending_alliances.iter().map(|proposal| AllianceProposalInfo {
-            proposal_id: proposal.proposal_id,
-            proposer: proposal.proposer,
-            target: proposal.target,
-        }).collect()
+        self.pending_alliances
+            .iter()
+            .map(|proposal| AllianceProposalInfo {
+                proposal_id: proposal.proposal_id,
+                proposer: proposal.proposer,
+                target: proposal.target,
+            })
+            .collect()
     }
 
     pub fn are_allied(&self, a: u8, b: u8) -> bool {
@@ -1867,40 +2423,74 @@ impl Simulation {
     }
 
     pub fn port_states(&self) -> Vec<PortStateInfo> {
-        let mut states = self.built_ports.iter().map(|&cell| PortStateInfo { cell_index: cell, owner_id: self.cells[cell as usize].owner_id, complete: true, remaining_seconds: 0.0 }).collect::<Vec<_>>();
-        states.extend(self.port_constructions.iter().map(|port| PortStateInfo { cell_index: port.cell_index, owner_id: port.builder, complete: false, remaining_seconds: port.remaining_seconds }));
+        let mut states = self
+            .built_ports
+            .iter()
+            .map(|&cell| PortStateInfo {
+                cell_index: cell,
+                owner_id: self.cells[cell as usize].owner_id,
+                complete: true,
+                remaining_seconds: 0.0,
+            })
+            .collect::<Vec<_>>();
+        states.extend(self.port_constructions.iter().map(|port| PortStateInfo {
+            cell_index: port.cell_index,
+            owner_id: port.builder,
+            complete: false,
+            remaining_seconds: port.remaining_seconds,
+        }));
         states
     }
 
     pub fn alliance_states(&self) -> Vec<AllianceInfo> {
-        self.alliances.iter().enumerate().map(|(i, pair)| AllianceInfo { alliance_id: i as u16 + 1, members: vec![pair.0, pair.1] }).collect()
+        self.alliances
+            .iter()
+            .enumerate()
+            .map(|(i, pair)| AllianceInfo {
+                alliance_id: i as u16 + 1,
+                members: vec![pair.0, pair.1],
+            })
+            .collect()
     }
 
     /// Splits a fixed victory/reward pool by authoritative controlled area.
     /// This is intentionally a pure calculation: no cosmetic or entitlement
     /// state can affect the result.
     pub fn alliance_reward_shares(&self, reward_pool: f64) -> Vec<(u8, f64)> {
-        let members: Vec<u8> = self.alliances.iter()
+        let members: Vec<u8> = self
+            .alliances
+            .iter()
             .flat_map(|pair| [pair.0, pair.1])
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-        let total_area: f64 = members.iter()
+        let total_area: f64 = members
+            .iter()
             .filter_map(|id| self.factions.iter().find(|f| f.faction_id == *id))
             .map(|f| f.controlled_area_km2.max(0.0))
             .sum();
         if total_area <= f64::EPSILON {
             return members.into_iter().map(|id| (id, 0.0)).collect();
         }
-        members.into_iter()
-            .filter_map(|id| self.factions.iter().find(|f| f.faction_id == id).map(|f| {
-                (id, reward_pool.max(0.0) * f.controlled_area_km2.max(0.0) / total_area)
-            }))
+        members
+            .into_iter()
+            .filter_map(|id| {
+                self.factions.iter().find(|f| f.faction_id == id).map(|f| {
+                    (
+                        id,
+                        reward_pool.max(0.0) * f.controlled_area_km2.max(0.0) / total_area,
+                    )
+                })
+            })
             .collect()
     }
 
     pub fn advance_pending_expansions(&mut self, dt: f64) {
-        const EXPANSION_CADENCE_SECONDS: f64 = 0.05;
+        // One authoritative connected layer per 250ms. This is deliberately
+        // slower than the 20Hz simulation tick so the client receives and
+        // renders a visible sequence of authoritative border mutations rather
+        // than a visually indistinguishable block pop.
+        const EXPANSION_CADENCE_SECONDS: f64 = 0.25;
         let mut i = 0;
         while i < self.pending_expansion_advances.len() {
             self.pending_expansion_advances[i].elapsed += dt;
@@ -1911,22 +2501,50 @@ impl Simulation {
                 && !self.pending_expansion_advances[i].cells.is_empty()
             {
                 self.pending_expansion_advances[i].elapsed -= EXPANSION_CADENCE_SECONDS;
-                let next_cell = self.pending_expansion_advances[i].cells.pop_front().unwrap();
+                let next_cell = self.pending_expansion_advances[i]
+                    .cells
+                    .pop_front()
+                    .unwrap();
                 let idx = next_cell as usize;
-                if idx < TOTAL_CELLS && self.cells[idx].owner_id == 0 && self.cells[idx].terrain_type == 0 {
-                    self.set_cell_owner(next_cell, faction_id);
-                    progress = true;
+                if idx < TOTAL_CELLS
+                    && self.cells[idx].owner_id == 0
+                    && self.cells[idx].terrain_type == 0
+                {
+                    let is_connected = crate::expansion::legal_land_neighbors(&self.cells, idx)
+                        .into_iter()
+                        .any(|adj| self.cells[adj].owner_id == faction_id);
+                    if is_connected {
+                        self.set_cell_owner(next_cell, faction_id);
+                        progress = true;
 
-                    // Check sea access
-                    let had_sea = self.pending_expansion_advances[i].had_sea_before;
-                    if !had_sea && Self::cardinal(idx).into_iter().any(|n| self.cells[n].terrain_type == 2) {
-                        self.pending_expansion_advances[i].had_sea_before = true;
-                        self.atlas_notifications.push(AtlasNotificationEvent {
-                            event_type: "SEA_ACCESS_ESTABLISHED".to_string(),
-                            message: "SEA ACCESS ESTABLISHED".to_string(),
-                            faction_id: Some(faction_id),
-                            cell_index: Some(next_cell),
-                        });
+                        // Check sea access
+                        let had_sea = self.pending_expansion_advances[i].had_sea_before;
+                        if !had_sea
+                            && Self::cardinal(idx)
+                                .into_iter()
+                                .any(|n| self.cells[n].terrain_type == 2)
+                        {
+                            self.pending_expansion_advances[i].had_sea_before = true;
+                            self.atlas_notifications.push(AtlasNotificationEvent {
+                                event_type: "SEA_ACCESS_ESTABLISHED".to_string(),
+                                message: "SEA ACCESS ESTABLISHED".to_string(),
+                                faction_id: Some(faction_id),
+                                cell_index: Some(next_cell),
+                            });
+                        }
+                    } else {
+                        // If parent hasn't mutated yet, push to back of queue once
+                        if self.pending_expansion_advances[i].cells.iter().any(|&c| {
+                            crate::expansion::cells_have_legal_land_connection(
+                                &self.cells,
+                                idx,
+                                c as usize,
+                            )
+                        }) {
+                            self.pending_expansion_advances[i]
+                                .cells
+                                .push_back(next_cell);
+                        }
                     }
 
                     // Check first contact
@@ -1940,7 +2558,11 @@ impl Simulation {
                             (curr_cx + 1, curr_cy),
                         ];
                         for (nx, ny) in curr_neighbors {
-                            if nx >= 0 && nx < (WORLD_WIDTH as i32) && ny >= 0 && ny < (WORLD_HEIGHT as i32) {
+                            if nx >= 0
+                                && nx < (WORLD_WIDTH as i32)
+                                && ny >= 0
+                                && ny < (WORLD_HEIGHT as i32)
+                            {
                                 let n_idx = (ny as usize) * WORLD_WIDTH + (nx as usize);
                                 let n_owner = self.cells[n_idx].owner_id;
                                 if n_owner > 0 && n_owner != faction_id {
@@ -1950,19 +2572,27 @@ impl Simulation {
                                     let mut cap_a_y = cy;
                                     let mut cap_b_x = cx;
                                     let mut cap_b_y = cy;
-                                    if let Some(fac_a) = self.factions.iter().find(|f| f.faction_id == faction_id) {
+                                    if let Some(fac_a) =
+                                        self.factions.iter().find(|f| f.faction_id == faction_id)
+                                    {
                                         cap_a_x = (fac_a.capital_cell % WORLD_WIDTH as u32) as f32;
                                         cap_a_y = (fac_a.capital_cell / WORLD_WIDTH as u32) as f32;
                                     }
-                                    if let Some(fac_b) = self.factions.iter().find(|f| f.faction_id == n_owner) {
+                                    if let Some(fac_b) =
+                                        self.factions.iter().find(|f| f.faction_id == n_owner)
+                                    {
                                         cap_b_x = (fac_b.capital_cell % WORLD_WIDTH as u32) as f32;
                                         cap_b_y = (fac_b.capital_cell / WORLD_WIDTH as u32) as f32;
                                     }
                                     if self.first_contact_tick.is_none() {
                                         self.first_contact_tick = Some(self.tick);
                                     }
-                                    self.combat_manager.register_contact(faction_id, n_owner, next_cell, cx, cy, cap_a_x, cap_a_y, cap_b_x, cap_b_y);
-                                    self.pending_expansion_advances[i].first_contact = Some((faction_id, n_owner, next_cell));
+                                    self.combat_manager.register_contact(
+                                        faction_id, n_owner, next_cell, cx, cy, cap_a_x, cap_a_y,
+                                        cap_b_x, cap_b_y,
+                                    );
+                                    self.pending_expansion_advances[i].first_contact =
+                                        Some((faction_id, n_owner, next_cell));
                                     break;
                                 }
                             }
@@ -1994,7 +2624,9 @@ impl Simulation {
         let mut finished = Vec::new();
         for construction in &mut self.port_constructions {
             construction.remaining_seconds = (construction.remaining_seconds - dt).max(0.0);
-            if construction.remaining_seconds <= 0.0 && self.cells[construction.cell_index as usize].owner_id == construction.builder {
+            if construction.remaining_seconds <= 0.0
+                && self.cells[construction.cell_index as usize].owner_id == construction.builder
+            {
                 finished.push(construction.cell_index);
             }
         }
@@ -2010,8 +2642,12 @@ impl Simulation {
     }
 
     fn return_front_survivors(&mut self, front_index: usize) {
-        let Some(front) = self.combat_manager.fronts.get_mut(front_index) else { return };
-        if front.survivors_returned { return; }
+        let Some(front) = self.combat_manager.fronts.get_mut(front_index) else {
+            return;
+        };
+        if front.survivors_returned {
+            return;
+        }
         // Permanent Commitment Rule:
         // Committed population is a permanent sunk cost.
         // No troops, expeditions, or survivors are returned to population.
@@ -2019,8 +2655,17 @@ impl Simulation {
     }
 
     fn settle_finished_fronts(&mut self) {
-        let finished: Vec<usize> = self.combat_manager.fronts.iter().enumerate()
-            .filter_map(|(index, front)| (!front.is_combat_active && !front.survivors_returned && front.operation_kind != "CONTACT").then_some(index))
+        let finished: Vec<usize> = self
+            .combat_manager
+            .fronts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, front)| {
+                (!front.is_combat_active
+                    && !front.survivors_returned
+                    && front.operation_kind != "CONTACT")
+                    .then_some(index)
+            })
             .collect();
         for index in finished {
             self.wars_completed += 1;
@@ -2033,7 +2678,7 @@ impl Simulation {
         self.refresh_all_economies();
     }
 
-    pub fn cancel_attack(&mut self, attacker: u8, front_id: u32) -> Result<(), String> {
+    pub fn cancel_attack(&mut self, faction_id: u8, front_id: u32) -> Result<(), String> {
         let Some(front_index) = self
             .combat_manager
             .fronts
@@ -2045,19 +2690,82 @@ impl Simulation {
         if !self.combat_manager.fronts[front_index].is_combat_active {
             return Err("front_not_active".to_string());
         }
-        if self.combat_manager.fronts[front_index].attacker_faction != attacker {
-            return Err("not_front_attacker".to_string());
+        if self.combat_manager.fronts[front_index].faction_a != faction_id
+            && self.combat_manager.fronts[front_index].faction_b != faction_id
+        {
+            return Err("not_front_participant".to_string());
+        }
+        let own_force = if self.combat_manager.fronts[front_index].faction_a == faction_id {
+            self.combat_manager.fronts[front_index].deployed_population_a
+        } else {
+            self.combat_manager.fronts[front_index].deployed_population_b
+        };
+        if own_force <= 0.0 {
+            return Err("no_deployed_population".to_string());
         }
         self.recovery_events += 1;
         self.return_front_survivors(front_index);
         let front = &mut self.combat_manager.fronts[front_index];
-        front.is_combat_active = false;
-        front.front_status = "RECOVERING".to_string();
-        front.termination_reason = "CANCELLED".to_string();
+        if front.faction_a == faction_id {
+            front.deployed_population_a = 0.0;
+        } else {
+            front.deployed_population_b = 0.0;
+        }
+        let other = if front.faction_a == faction_id {
+            front.faction_b
+        } else {
+            front.faction_a
+        };
+        let other_force = if front.faction_a == other {
+            front.deployed_population_a
+        } else {
+            front.deployed_population_b
+        };
+        if other_force >= MIN_ATTACK_DEPLOYMENT * 0.05 {
+            front.attacker_faction = other;
+            front.front_status = "ADVANCING".to_string();
+            front.termination_reason = "ACTIVE".to_string();
+            front.survivors_returned = false;
+        } else {
+            front.is_combat_active = false;
+            front.front_status = "RECOVERING".to_string();
+            front.termination_reason = "CANCELLED".to_string();
+        }
         self.pending_war_advances
             .retain(|advance| advance.front_index != front_index);
         self.settle_finished_fronts();
         Ok(())
+    }
+
+    pub fn population_growth_breakdown(fac: &FactionInfo) -> PopulationGrowthBreakdown {
+        let living = fac.population.max(0.0);
+        let capacity = fac.population_capacity.max(1.0);
+        let ratio = living / capacity;
+        let saturation_factor = (1.0 - ratio.powi(2)).max(0.0);
+        let reserve_component = crate::balance::RESERVE_GROWTH_RATE * living;
+        let effective_territory = ((fac.territory_count as f64)
+            * (fac.consolidation_ratio as f64).clamp(0.20, 1.0))
+        .max(1.0);
+        let frontier_distance = (effective_territory - 1.0).max(0.0);
+        let long_realm_component =
+            effective_territory.powf(crate::balance::TERRITORY_GROWTH_EXPONENT);
+        let frontier_uplift = crate::balance::TERRITORY_GROWTH_FRONTIER_BONUS_SCALE
+            * frontier_distance
+            * (-crate::balance::TERRITORY_GROWTH_FRONTIER_BONUS_RATE * frontier_distance).exp();
+        let territory_multiplier = long_realm_component + frontier_uplift;
+        let territory_component = crate::balance::TERRITORY_GROWTH_BASE * territory_multiplier;
+        let doctrine_modifier = (1.0 + fac.doctrine_expansion * 0.5).clamp(0.9, 1.1) as f64;
+        let final_component =
+            (reserve_component + territory_component) * saturation_factor * doctrine_modifier;
+
+        PopulationGrowthBreakdown {
+            reserve_component,
+            territory_component,
+            saturation_factor,
+            population_capacity: capacity,
+            doctrine_modifier,
+            final_component,
+        }
     }
 
     fn refresh_faction_economy(fac: &mut FactionInfo) {
@@ -2069,26 +2777,21 @@ impl Simulation {
             fac.total_living_population = 0.0;
             return;
         }
-        fac.effective_controlled_area_km2 = fac.effective_controlled_area_km2
+        fac.effective_controlled_area_km2 = fac
+            .effective_controlled_area_km2
             .max(0.0)
             .min(fac.controlled_area_km2);
         let consolidation = (fac.consolidation_ratio as f64).clamp(0.20, 1.0);
         let effective_territory = ((fac.territory_count as f64) * consolidation).max(1.0);
         fac.population_capacity = crate::balance::BASE_HOMELAND_CAPACITY
             + effective_territory * crate::balance::CAPACITY_PER_TERRITORY_CELL;
-        fac.total_living_population = fac.population + fac.deployed_population;
+        // Population is the one strategic resource. A commitment leaves the
+        // population ledger immediately; deployed pressure is operation
+        // strength, not a second pool of living people that can later return.
+        fac.total_living_population = fac.population;
 
-        let living = fac.population.max(0.0);
-        let capacity = fac.population_capacity.max(1.0);
-        let ratio = living / capacity;
-        let saturation_factor = (1.0 - ratio.powi(2)).max(0.0);
-        let reserve_component = crate::balance::RESERVE_GROWTH_RATE * living;
-        let territory_component = crate::balance::TERRITORY_GROWTH_BASE
-            * effective_territory.powf(crate::balance::TERRITORY_GROWTH_EXPONENT);
-        let doctrine_modifier = (1.0 + fac.doctrine_expansion * 0.5).clamp(0.9, 1.1) as f64;
-        fac.population_growth_per_second = (reserve_component + territory_component)
-            * saturation_factor
-            * doctrine_modifier;
+        let breakdown = Self::population_growth_breakdown(fac);
+        fac.population_growth_per_second = breakdown.final_component;
     }
 
     pub fn refresh_all_economies(&mut self) {
@@ -2106,29 +2809,35 @@ impl Simulation {
             }
         }
         for front in &self.combat_manager.fronts {
-            if !front.is_combat_active { continue; }
+            if !front.is_combat_active {
+                continue;
+            }
             if (front.faction_a as usize) < deployed.len() {
                 deployed[front.faction_a as usize] += front.deployed_population_a;
             }
             if (front.faction_b as usize) < deployed.len() {
                 deployed[front.faction_b as usize] += front.deployed_population_b;
             }
+            // A shared force already belongs to another active local front.
+            // Avoid counting it twice. Defense foci are removed from the
+            // staging list when consumed, so they remain part of this front.
             let defender = if front.attacker_faction == front.faction_a {
                 front.faction_b
             } else {
                 front.faction_a
             };
             if (defender as usize) < deployed.len() {
-                deployed[defender as usize] = (deployed[defender as usize]
-                    - front.defense_focus_population
-                    - front.shared_local_force_population).max(0.0);
+                deployed[defender as usize] =
+                    (deployed[defender as usize] - front.shared_local_force_population).max(0.0);
             }
         }
         for fac in &mut self.factions {
             fac.ports_count = port_counts[fac.faction_id as usize];
             fac.deployed_population = deployed[fac.faction_id as usize];
             Self::refresh_faction_economy(fac);
-            if fac.is_eliminated { continue; }
+            if fac.is_eliminated {
+                continue;
+            }
             fac.population_growth_per_second += fac.ports_count as f64
                 * PORT_POPULATION_GROWTH_BONUS
                 * (1.0 + fac.doctrine_maritime as f64 * 1.5).clamp(0.91, 1.09);
@@ -2152,8 +2861,10 @@ impl Simulation {
             for y in 0..WORLD_HEIGHT {
                 let y_f = y as f64;
                 let lat_north = std::f64::consts::FRAC_PI_2 - (y_f / h) * std::f64::consts::PI;
-                let lat_south = std::f64::consts::FRAC_PI_2 - ((y_f + 1.0) / h) * std::f64::consts::PI;
-                arr[y] = EARTH_RADIUS_KM.powi(2) * delta_lon * (lat_north.sin() - lat_south.sin()).abs();
+                let lat_south =
+                    std::f64::consts::FRAC_PI_2 - ((y_f + 1.0) / h) * std::f64::consts::PI;
+                arr[y] =
+                    EARTH_RADIUS_KM.powi(2) * delta_lon * (lat_north.sin() - lat_south.sin()).abs();
             }
             arr
         })
@@ -2176,8 +2887,13 @@ impl Simulation {
                 let y = index / WORLD_WIDTH;
                 let area = row_areas[y.min(WORLD_HEIGHT - 1)];
                 areas[cell.owner_id as usize] += area;
-                let supply_mult = if self.cell_supply.get(index).copied() == Some(0) { 0.35 } else { 1.0 };
-                effective_areas[cell.owner_id as usize] += area * self.cell_consolidation[index] as f64 * supply_mult;
+                let supply_mult = if self.cell_supply.get(index).copied() == Some(0) {
+                    0.35
+                } else {
+                    1.0
+                };
+                effective_areas[cell.owner_id as usize] +=
+                    area * self.cell_consolidation[index] as f64 * supply_mult;
             }
         }
         for fac in &mut self.factions {
@@ -2185,10 +2901,12 @@ impl Simulation {
             fac.controlled_area_km2 = areas[fid];
             fac.effective_controlled_area_km2 = effective_areas[fid];
             if fac.controlled_area_km2 > 0.0 {
-                let ratio = (fac.effective_controlled_area_km2 / fac.controlled_area_km2).clamp(0.0, 1.0) as f32;
+                let ratio = (fac.effective_controlled_area_km2 / fac.controlled_area_km2)
+                    .clamp(0.0, 1.0) as f32;
                 fac.consolidation_ratio = ratio;
                 fac.overextension_ratio = (1.0 - ratio).clamp(0.0, 1.0);
-                self.max_overextension_seen = self.max_overextension_seen.max(fac.overextension_ratio);
+                self.max_overextension_seen =
+                    self.max_overextension_seen.max(fac.overextension_ratio);
             } else {
                 fac.consolidation_ratio = 1.0;
                 fac.overextension_ratio = 0.0;
@@ -2209,7 +2927,11 @@ impl Simulation {
                 self.cell_consolidation[idx] = next;
                 let y = idx / WORLD_WIDTH;
                 let area = row_areas[y.min(WORLD_HEIGHT - 1)];
-                let supply_mult = if self.cell_supply.get(idx).copied() == Some(0) { 0.35 } else { 1.0 };
+                let supply_mult = if self.cell_supply.get(idx).copied() == Some(0) {
+                    0.35
+                } else {
+                    1.0
+                };
                 effective_areas[owner] += area * next as f64 * supply_mult;
             }
         }
@@ -2219,10 +2941,12 @@ impl Simulation {
             faction.effective_controlled_area_km2 = effective_areas[fid];
             let raw_area = faction.controlled_area_km2;
             if raw_area > 0.0 {
-                let ratio = (faction.effective_controlled_area_km2 / raw_area).clamp(0.0, 1.0) as f32;
+                let ratio =
+                    (faction.effective_controlled_area_km2 / raw_area).clamp(0.0, 1.0) as f32;
                 faction.consolidation_ratio = ratio;
                 faction.overextension_ratio = (1.0 - ratio).clamp(0.0, 1.0);
-                self.max_overextension_seen = self.max_overextension_seen.max(faction.overextension_ratio);
+                self.max_overextension_seen =
+                    self.max_overextension_seen.max(faction.overextension_ratio);
             } else {
                 faction.consolidation_ratio = 1.0;
                 faction.overextension_ratio = 0.0;
@@ -2235,14 +2959,26 @@ impl Simulation {
             MacroPhase::ExpansionEra => {
                 self.macro_phase_timer += dt;
                 let neutral_land_cells = if self.tick % 20 == 0 || dt >= 0.5 {
-                    self.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id == 0).count()
+                    self.cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, cell)| {
+                            self.playable_land_mask[*index] == 1 && cell.owner_id == 0
+                        })
+                        .count()
                 } else {
-                    let owned_land_cells: usize = self.factions.iter().map(|f| f.territory_count as usize).sum();
-                    self.total_land_cells.saturating_sub(owned_land_cells)
+                    let owned_land_cells: usize = self
+                        .factions
+                        .iter()
+                        .map(|f| f.territory_count as usize)
+                        .sum();
+                    self.playable_land_cells.saturating_sub(owned_land_cells)
                 };
-                let neutral_ratio = neutral_land_cells as f64 / self.total_land_cells.max(1) as f64;
+                let neutral_ratio =
+                    neutral_land_cells as f64 / self.playable_land_cells.max(1) as f64;
                 if neutral_ratio <= crate::balance::EXPANSION_ERA_NEUTRAL_THRESHOLD
-                    || self.macro_phase_timer >= crate::balance::EXPANSION_ERA_MAX_SECONDS
+                    || (self.macro_phase_timer >= crate::balance::EXPANSION_ERA_MAX_SECONDS
+                        && neutral_ratio <= crate::balance::EXPANSION_ERA_TIMEOUT_NEUTRAL_THRESHOLD)
                 {
                     self.macro_phase = MacroPhase::FinalFrontier;
                     self.macro_phase_timer = crate::balance::FINAL_FRONTIER_ARMISTICE_SECONDS;
@@ -2368,7 +3104,7 @@ impl Simulation {
         let mut seen = HashSet::from([start]);
         let mut queue = VecDeque::from([start]);
         while let Some(index) = queue.pop_front() {
-            for neighbor in Self::cardinal(index) {
+            for neighbor in crate::expansion::legal_land_neighbors(&self.cells, index) {
                 if removed.contains(&neighbor)
                     || self.cells[neighbor].owner_id != defender
                     || !seen.insert(neighbor)
@@ -2401,28 +3137,7 @@ impl Simulation {
     pub fn topology_violations(&self) -> (usize, usize) {
         let mut disconnected = 0;
         for f in &self.factions {
-            let owned: HashSet<usize> = self
-                .cells
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| (c.owner_id == f.faction_id).then_some(i))
-                .collect();
-            if owned.is_empty() {
-                continue;
-            }
-            let mut seen = HashSet::new();
-            let mut q = VecDeque::from([f.capital_cell as usize]);
-            while let Some(i) = q.pop_front() {
-                if !owned.contains(&i) || !seen.insert(i) {
-                    continue;
-                }
-                for n in Self::cardinal(i) {
-                    if owned.contains(&n) && !seen.contains(&n) {
-                        q.push_back(n)
-                    }
-                }
-            }
-            if seen.len() != owned.len() {
+            if !self.owner_grid_is_connected(f.faction_id) {
                 disconnected += 1
             }
         }
@@ -2441,6 +3156,76 @@ impl Simulation {
         (disconnected, holes)
     }
 
+    /// Canonical final-owner connectivity check used by expansion, war
+    /// diagnostics, and runtime audits. It deliberately uses the same legal
+    /// land rule as patch generation, including the no-water diagonal corner
+    /// guard.
+    pub fn owner_grid_is_connected(&self, faction_id: u8) -> bool {
+        let owned_count = self
+            .cells
+            .iter()
+            .filter(|cell| cell.owner_id == faction_id)
+            .count();
+        if owned_count <= 1 {
+            return true;
+        }
+        let root = self
+            .factions
+            .iter()
+            .find(|f| {
+                f.faction_id == faction_id
+                    && self
+                        .cells
+                        .get(f.capital_cell as usize)
+                        .is_some_and(|c| c.owner_id == faction_id)
+            })
+            .map(|f| f.capital_cell as usize)
+            .or_else(|| {
+                self.cells
+                    .iter()
+                    .position(|cell| cell.owner_id == faction_id)
+            });
+        let Some(root) = root else {
+            return false;
+        };
+        let mut seen = HashSet::from([root]);
+        let mut queue = VecDeque::from([root]);
+        while let Some(index) = queue.pop_front() {
+            for neighbor in crate::expansion::legal_land_neighbors(&self.cells, index) {
+                if self.cells[neighbor].owner_id == faction_id && seen.insert(neighbor) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+        seen.len() == owned_count
+    }
+
+    fn patch_is_connected_to_owner(&self, owner: u8, patch: &[u32]) -> bool {
+        let mut virtual_owned: HashSet<usize> = self
+            .cells
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| (cell.owner_id == owner).then_some(index))
+            .collect();
+        for &cell in patch {
+            let index = cell as usize;
+            if index >= self.cells.len()
+                || self.cells[index].terrain_type == 2
+                || self.cells[index].owner_id != 0
+            {
+                return false;
+            }
+            let connected = crate::expansion::legal_land_neighbors(&self.cells, index)
+                .into_iter()
+                .any(|neighbor| virtual_owned.contains(&neighbor));
+            if !connected {
+                return false;
+            }
+            virtual_owned.insert(index);
+        }
+        true
+    }
+
     pub fn step_dt(&mut self, dt_seconds: f64) -> (f64, Vec<CellDelta>) {
         let start = Instant::now();
         self.tick += 1;
@@ -2454,20 +3239,30 @@ impl Simulation {
         }
         self.advance_macro_phase(dt_seconds as f32);
         for fac in &mut self.factions {
-            if fac.is_eliminated { continue; }
+            if fac.is_eliminated {
+                continue;
+            }
             let growth = fac.population_growth_per_second;
             fac.population = (fac.population + growth * dt_seconds).max(0.0);
-            fac.total_living_population = fac.population + fac.deployed_population;
+            fac.total_living_population = fac.population;
         }
         self.step_wars(dt_seconds);
         self.refresh_all_economies();
         self.update_match_outcome();
 
         if self.tick == 6000 {
-            self.surviving_civs_5min = self.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
+            self.surviving_civs_5min = self
+                .factions
+                .iter()
+                .filter(|f| !f.is_eliminated && f.territory_count > 0)
+                .count();
         }
         if self.tick == 12000 {
-            self.surviving_civs_10min = self.factions.iter().filter(|f| !f.is_eliminated && f.territory_count > 0).count();
+            self.surviving_civs_10min = self
+                .factions
+                .iter()
+                .filter(|f| !f.is_eliminated && f.territory_count > 0)
+                .count();
         }
 
         let deltas: Vec<CellDelta> = self
@@ -2494,10 +3289,31 @@ impl Simulation {
         self.step_dt(0.05)
     }
 
+    /// Number of already-authorized cells in one successful local war wave.
+    ///
+    /// A stronger commitment produces a broader absolute territorial push,
+    /// but each extra doubling buys less additional width.  This is applied
+    /// only after the shared front has won its pressure check; a weak attack
+    /// still captures nothing and never receives a minimum-cell rescue.
+    fn local_war_commitment_scale(deployed_population: f64) -> f64 {
+        let doublings_above_normal = (deployed_population.max(10_000.0) / 10_000.0).log2();
+        (1.0 + doublings_above_normal * 0.22).clamp(1.0, 2.0)
+    }
+
+    fn local_war_advance_cells(status: &str, deployed_population: f64) -> usize {
+        let base = match status {
+            "BREAKTHROUGH" => 80.0,
+            "ADVANCING" => 48.0,
+            _ => 24.0,
+        };
+        (base * Self::local_war_commitment_scale(deployed_population)).round() as usize
+    }
+
     fn step_wars(&mut self, dt: f64) {
         if self.match_over {
             return;
         }
+        let profile_started = Instant::now();
         self.advance_pending_war_conquests(dt);
         let mut captures = Vec::new();
         let mut neutral_landings = Vec::new();
@@ -2511,156 +3327,220 @@ impl Simulation {
             if !front.is_combat_active {
                 continue;
             }
-            let attacker = front.attacker_faction;
-            let defender = if attacker == front.faction_a {
-                front.faction_b
-            } else {
-                front.faction_a
-            };
-            if defender == 0 {
+            let faction_a = front.faction_a;
+            let faction_b = front.faction_b;
+            if faction_b == 0 {
                 // A real long-range landing against neutral coast has no
                 // defending faction, but still resolves through the same
                 // authoritative front and one exact destination cell.
-                neutral_landings.push((front_index, attacker, front.target_cell_index));
+                neutral_landings.push((
+                    front_index,
+                    front.attacker_faction,
+                    front.target_cell_index,
+                ));
                 front.is_combat_active = false;
                 front.termination_reason = "ATTACKER_SUCCESS".to_string();
                 continue;
             }
-            let attacker_alive = self
+            let a_alive = self
                 .factions
                 .iter()
-                .any(|f| f.faction_id == attacker && !f.is_eliminated && f.territory_count > 0);
-            let defender_alive = self
+                .any(|f| f.faction_id == faction_a && !f.is_eliminated && f.territory_count > 0);
+            let b_alive = self
                 .factions
                 .iter()
-                .any(|f| f.faction_id == defender && !f.is_eliminated && f.territory_count > 0);
-            if !attacker_alive {
+                .any(|f| f.faction_id == faction_b && !f.is_eliminated && f.territory_count > 0);
+            if !a_alive || !b_alive {
                 front.is_combat_active = false;
-                front.termination_reason = "ATTACKER_ELIMINATED".to_string();
+                front.termination_reason = if !a_alive && !b_alive {
+                    "BOTH_FACTIONS_ELIMINATED"
+                } else if !a_alive {
+                    "FACTION_A_ELIMINATED"
+                } else {
+                    "FACTION_B_ELIMINATED"
+                }
+                .to_string();
                 continue;
             }
-            if !defender_alive {
-                front.is_combat_active = false;
-                front.termination_reason = "DEFENDER_ELIMINATED".to_string();
-                continue;
-            }
-            let Some(_di) = self.factions.iter().position(|f| f.faction_id == defender) else {
-                front.is_combat_active = false;
-                front.termination_reason = "NO_VALID_FRONT".to_string();
-                continue;
-            };
-            let attacker_is_a = attacker == front.faction_a;
-            let raw_attack = if attacker_is_a { front.deployed_population_a } else { front.deployed_population_b };
-            let raw_defense = if attacker_is_a { front.deployed_population_b } else { front.deployed_population_a };
 
-            let attacker_supplied = self.cell_supply.get(front.source_cell_index as usize).copied() == Some(1);
-            let defender_supplied = self.cell_supply.get(front.target_cell_index as usize).copied() == Some(1);
+            // One active operation is one mutual local front. Pressure is
+            // signed in canonical faction order: positive means A pushes
+            // into B, negative means B pushes into A. A reverse order or a
+            // reinforcement therefore changes this same contest rather than
+            // painting an overlapping second battle.
+            let raw_a = front.deployed_population_a.max(0.0);
+            let raw_b = front.deployed_population_b.max(0.0);
+            if raw_a < MIN_ATTACK_DEPLOYMENT * 0.05 && raw_b < MIN_ATTACK_DEPLOYMENT * 0.05 {
+                front.is_combat_active = false;
+                front.termination_reason = "BOTH_SIDES_OUT_OF_FORCES".to_string();
+                continue;
+            }
+
+            let anchor_a = front
+                .border_cells_a
+                .iter()
+                .copied()
+                .find(|cell| {
+                    self.cells
+                        .get(*cell as usize)
+                        .is_some_and(|state| state.owner_id == faction_a)
+                })
+                .or_else(|| {
+                    [front.source_cell_index, front.target_cell_index]
+                        .into_iter()
+                        .find(|cell| {
+                            self.cells
+                                .get(*cell as usize)
+                                .is_some_and(|state| state.owner_id == faction_a)
+                        })
+                });
+            let anchor_b = front
+                .border_cells_b
+                .iter()
+                .copied()
+                .find(|cell| {
+                    self.cells
+                        .get(*cell as usize)
+                        .is_some_and(|state| state.owner_id == faction_b)
+                })
+                .or_else(|| {
+                    [front.target_cell_index, front.source_cell_index]
+                        .into_iter()
+                        .find(|cell| {
+                            self.cells
+                                .get(*cell as usize)
+                                .is_some_and(|state| state.owner_id == faction_b)
+                        })
+                });
+            let supplied_a = anchor_a
+                .and_then(|cell| self.cell_supply.get(cell as usize))
+                .copied()
+                == Some(1);
+            let supplied_b = anchor_b
+                .and_then(|cell| self.cell_supply.get(cell as usize))
+                .copied()
+                == Some(1);
 
             // Cohesion and supply degradation
-            if !attacker_supplied {
-                front.cohesion = (front.cohesion - crate::balance::COHESION_LOSS_RATE * dt as f32).max(0.15);
-                front.supply_efficiency = (front.supply_efficiency - 0.04 * dt as f32).max(0.20);
+            if !supplied_a || !supplied_b {
+                front.cohesion =
+                    (front.cohesion - crate::balance::COHESION_LOSS_RATE * dt as f32).max(0.15);
             } else {
-                front.cohesion = (front.cohesion + crate::balance::COHESION_RECOVERY_RATE * dt as f32).min(1.0);
-                front.supply_efficiency = 1.0;
+                front.cohesion =
+                    (front.cohesion + crate::balance::COHESION_RECOVERY_RATE * dt as f32).min(1.0);
             }
+            front.supply_efficiency = if supplied_a && supplied_b { 1.0 } else { 0.70 };
 
-            let front_width = front.border_cells_a.len().max(front.border_cells_b.len()).max(1);
-            let target_consolidation = (self.cell_consolidation[front.target_cell_index as usize] as f64).clamp(0.08, 1.0);
+            let front_width = front
+                .border_cells_a
+                .len()
+                .max(front.border_cells_b.len())
+                .max(1);
+            let consolidation_a = anchor_a
+                .and_then(|cell| self.cell_consolidation.get(cell as usize))
+                .copied()
+                .unwrap_or(0.08) as f64;
+            let consolidation_b = anchor_b
+                .and_then(|cell| self.cell_consolidation.get(cell as usize))
+                .copied()
+                .unwrap_or(0.08) as f64;
 
-            let eff_attack = crate::combat::calculate_effective_combat_power(
-                raw_attack,
+            let power_a = crate::combat::calculate_effective_combat_power(
+                raw_a,
                 front_width,
-                front.supply_efficiency as f64,
+                if supplied_a { 1.0 } else { 0.40 },
                 front.cohesion as f64,
-                offense[attacker as usize],
-                1.0,
+                offense[faction_a as usize] * 0.65 + defense_doctrine[faction_a as usize] * 0.35,
+                0.85 + 0.25 * consolidation_a.clamp(0.08, 1.0),
             );
-
-            let def_supply_eff = if defender_supplied { 1.0 } else { 0.40 };
-            let eff_defense = crate::combat::calculate_effective_combat_power(
-                raw_defense,
+            let power_b = crate::combat::calculate_effective_combat_power(
+                raw_b,
                 front_width,
-                def_supply_eff,
-                1.0,
-                defense_doctrine[defender as usize],
-                0.35 + 0.65 * target_consolidation,
+                if supplied_b { 1.0 } else { 0.40 },
+                front.cohesion as f64,
+                offense[faction_b as usize] * 0.65 + defense_doctrine[faction_b as usize] * 0.35,
+                0.85 + 0.25 * consolidation_b.clamp(0.08, 1.0),
             );
-
-            let advantage = eff_attack / (eff_defense * 0.40 + 8.0);
-            let direction = if attacker == front.faction_a {
-                1.0
-            } else {
-                -1.0
-            };
-
-            let adv_clamp = advantage.sqrt().clamp(0.4, 2.5);
-            let base_att_rate = crate::balance::COMBAT_BASE_CASUALTY_RATE * (0.8 / adv_clamp);
-            let base_def_rate = crate::balance::COMBAT_BASE_CASUALTY_RATE * (0.8 * adv_clamp);
-
-            let attack_loss = ((raw_defense * 0.005 + raw_attack * base_att_rate + 25.0)
-                * (1.0 - offense[attacker as usize] * 1.5).clamp(0.85, 1.15) * dt).min(raw_attack);
-            let defense_loss = ((raw_attack * 0.008 + raw_defense * base_def_rate + 35.0)
-                * (1.0 - defense_doctrine[defender as usize] * 1.5).clamp(0.85, 1.15) * dt).min(raw_defense);
-            let remaining_force = (raw_attack - attack_loss).max(0.0);
-            let remaining_defense = (raw_defense - defense_loss).max(0.0);
-            if attacker_is_a {
-                front.deployed_population_a = remaining_force;
-                front.deployed_population_b = remaining_defense;
-            } else {
-                front.deployed_population_b = remaining_force;
-                front.deployed_population_a = remaining_defense;
-            }
-            front.casualties += attack_loss + defense_loss;
+            let total_power = power_a + power_b + 2.0;
+            let net = ((power_a - power_b) / total_power).clamp(-0.95, 0.95);
+            let intensity = (power_a.min(power_b) / total_power).clamp(0.0, 0.5);
+            let loss_a = ((raw_a * crate::balance::COMBAT_BASE_CASUALTY_RATE * 0.55
+                + power_b * 0.0015
+                + 6.0 * intensity)
+                * (1.0 - defense_doctrine[faction_a as usize]).clamp(0.88, 1.12)
+                * dt)
+                .min(raw_a);
+            let loss_b = ((raw_b * crate::balance::COMBAT_BASE_CASUALTY_RATE * 0.55
+                + power_a * 0.0015
+                + 6.0 * intensity)
+                * (1.0 - defense_doctrine[faction_b as usize]).clamp(0.88, 1.12)
+                * dt)
+                .min(raw_b);
+            front.deployed_population_a = (raw_a - loss_a).max(0.0);
+            front.deployed_population_b = (raw_b - loss_b).max(0.0);
+            front.casualties += loss_a + loss_b;
             self.largest_battle_casualties = self.largest_battle_casualties.max(front.casualties);
 
-            // 9-State Operation Lifecycle Machine (Task 35 & 38)
             if self.tick.saturating_sub(front.started_tick) < 8 {
                 front.front_status = "MOBILIZING".to_string();
-            } else if !attacker_supplied {
-                front.front_status = "RETREATING".to_string();
-                self.encirclements_count += 1;
-            } else if advantage > 2.0 || (advantage > 1.45 && remaining_defense < 1000.0) {
+            } else if net.abs() >= 0.58 {
                 front.front_status = "BREAKTHROUGH".to_string();
-            } else if advantage > 1.25 {
+            } else if net.abs() >= 0.25 {
                 front.front_status = "ADVANCING".to_string();
-            } else if advantage < 0.65 || front.cohesion < 0.30 {
-                front.front_status = "RETREATING".to_string();
-            } else if front.casualties > 15_000.0 && (advantage - 1.0).abs() < 0.20 {
+            } else if net.abs() <= 0.06 {
                 front.front_status = "STALLED".to_string();
             } else {
                 front.front_status = "ENGAGED".to_string();
             }
 
-            front.pressure = (front.pressure + direction * ((advantage - 0.65) * 0.12 * dt) as f32)
-                .clamp(-1.0, 1.0);
-            let pushed = (direction > 0.0 && front.pressure >= 0.72)
-                || (direction < 0.0 && front.pressure <= -0.72);
-            if pushed {
-                let preferred = if attacker == front.faction_a {
-                    front.border_cells_b.first()
+            // A genuinely balanced fight settles instead of drifting because
+            // of turn order. A material advantage bends the shared border.
+            if net.abs() <= 0.035 {
+                front.pressure *= (1.0 - (0.18 * dt) as f32).max(0.0);
+            } else {
+                front.pressure = (front.pressure + (net * 0.34 * dt) as f32).clamp(-1.0, 1.0);
+            }
+            if front.pressure.abs() >= 0.72 {
+                let (winner, loser, preferred) = if front.pressure > 0.0 {
+                    (
+                        faction_a,
+                        faction_b,
+                        front
+                            .border_cells_b
+                            .first()
+                            .copied()
+                            .unwrap_or(front.target_cell_index),
+                    )
                 } else {
-                    front.border_cells_a.first()
-                }
-                .copied()
-                .unwrap_or(0);
+                    (
+                        faction_b,
+                        faction_a,
+                        front
+                            .border_cells_a
+                            .first()
+                            .copied()
+                            .unwrap_or(front.source_cell_index),
+                    )
+                };
                 let pending_for_front = self
                     .pending_war_advances
                     .iter()
                     .any(|advance| advance.front_index == front_index && !advance.cells.is_empty());
                 if !pending_for_front {
-                    captures.push((front_index, attacker, defender, preferred));
+                    captures.push((front_index, winner, loser, preferred));
                 }
-                front.pressure = direction as f32 * 0.15
-            }
-            if remaining_force < MIN_ATTACK_DEPLOYMENT * 0.05 {
-                front.is_combat_active = false;
-                front.termination_reason = "ATTACKER_OUT_OF_FORCES".to_string();
+                front.attacker_faction = winner;
+                front.pressure = front.pressure.signum() * 0.15;
             }
         }
         for (front_index, attacker, target) in neutral_landings {
-            if self.cells.get(target as usize).is_some_and(|cell| cell.owner_id == 0) {
+            if self
+                .cells
+                .get(target as usize)
+                .is_some_and(|cell| cell.owner_id == 0)
+            {
                 if self.set_cell_owner(target, attacker) {
+                    self.activate_overseas_component(target);
                     if let Some(front) = self.combat_manager.fronts.get_mut(front_index) {
                         front.captured_cells = front.captured_cells.saturating_add(1);
                     }
@@ -2668,18 +3548,29 @@ impl Simulation {
             }
         }
         for (front_index, attacker, defender, preferred) in captures {
-            if let Some(target) = self.find_directional_war_frontier_target(front_index, attacker, defender, preferred) {
-                let advance_cells_count = if let Some(front) = self.combat_manager.fronts.get(front_index) {
-                    if front.front_status == "BREAKTHROUGH" {
-                        12
-                    } else if front.front_status == "ADVANCING" {
-                        8
-                    } else {
-                        4
-                    }
-                } else {
-                    4
-                };
+            // A pending patch may have consumed the front's previously
+            // remembered defender cell.  Before declaring the operation
+            // invalid, recover the *same* front from a real nearby shared
+            // border in its connected local theatre.  This is deliberately
+            // not a global pair search: water, neutral land and third-party
+            // territory are never traversed.
+            let target = self
+                .find_directional_war_frontier_target(front_index, attacker, defender, preferred)
+                .or_else(|| self.reanchor_local_war_front(front_index, attacker, defender));
+            if let Some(target) = target {
+                let advance_cells_count = self
+                    .combat_manager
+                    .fronts
+                    .get(front_index)
+                    .map(|front| {
+                        let deployed = if attacker == front.faction_a {
+                            front.deployed_population_a
+                        } else {
+                            front.deployed_population_b
+                        };
+                        Self::local_war_advance_cells(&front.front_status, deployed)
+                    })
+                    .unwrap_or(24);
                 let patch = generate_compact_patch(
                     &self.cells,
                     attacker,
@@ -2712,6 +3603,8 @@ impl Simulation {
                 .is_some_and(|front| front.is_combat_active)
         });
         self.settle_finished_fronts();
+        self.profile_war_resolution_ns += profile_started.elapsed().as_nanos();
+        self.profile_war_resolution_calls += 1;
     }
 
     /// Applies an already-authorized war patch as a deterministic frontier
@@ -2719,7 +3612,6 @@ impl Simulation {
     /// morphology routine; this only changes when its cells are revealed to
     /// the client, never which cells are eligible.
     fn advance_pending_war_conquests(&mut self, dt: f64) {
-        const CAPTURE_CADENCE_SECONDS: f64 = 0.35;
         let mut pending = std::mem::take(&mut self.pending_war_advances);
         let mut remaining = Vec::with_capacity(pending.len());
 
@@ -2727,9 +3619,24 @@ impl Simulation {
             advance.elapsed += dt;
             let mut completed_front = false;
             let mut last_captured_cell = None;
-            while advance.elapsed >= CAPTURE_CADENCE_SECONDS && !advance.cells.is_empty() {
-                advance.elapsed -= CAPTURE_CADENCE_SECONDS;
-                let Some(cell) = advance.cells.pop_front() else { break };
+            let capture_cadence = self
+                .combat_manager
+                .fronts
+                .get(advance.front_index)
+                .map(|front| {
+                    let deployed = if advance.attacker == front.faction_a {
+                        front.deployed_population_a
+                    } else {
+                        front.deployed_population_b
+                    };
+                    0.10 / Self::local_war_commitment_scale(deployed)
+                })
+                .unwrap_or(0.10);
+            while advance.elapsed >= capture_cadence && !advance.cells.is_empty() {
+                advance.elapsed -= capture_cadence;
+                let Some(cell) = advance.cells.pop_front() else {
+                    break;
+                };
                 last_captured_cell = Some(cell);
                 if self.cells[cell as usize].owner_id != advance.defender {
                     continue;
@@ -2740,6 +3647,16 @@ impl Simulation {
                 self.territory_turnover += 1;
                 if let Some(front) = self.combat_manager.fronts.get_mut(advance.front_index) {
                     front.captured_cells = front.captured_cells.saturating_add(1);
+                    // The theatre follows the actual contested boundary. A
+                    // static operation origin makes a successful front fall
+                    // out of its own local search radius and restart as a
+                    // separate war after ~36 cells.
+                    front.source_cell_index = cell;
+                    if advance.attacker == front.faction_a {
+                        front.border_cells_a = vec![cell];
+                    } else {
+                        front.border_cells_b = vec![cell];
+                    }
                 }
                 let next = self.find_directional_war_frontier_target(
                     advance.front_index,
@@ -2751,8 +3668,10 @@ impl Simulation {
                     if let Some(front) = self.combat_manager.fronts.get_mut(advance.front_index) {
                         front.target_cell_index = next;
                         if advance.attacker == front.faction_a {
+                            front.border_cells_a = vec![cell];
                             front.border_cells_b = vec![next];
                         } else {
+                            front.border_cells_b = vec![cell];
                             front.border_cells_a = vec![next];
                         }
                     }
@@ -2761,7 +3680,8 @@ impl Simulation {
                 }
             }
             if completed_front {
-                let mop_up_remnant = last_captured_cell.and_then(|c| self.find_mop_up_remnant(c, advance.attacker, advance.defender));
+                let mop_up_remnant = last_captured_cell
+                    .and_then(|c| self.find_mop_up_remnant(c, advance.attacker, advance.defender));
                 let next_target = if mop_up_remnant.is_none() {
                     last_captured_cell.and_then(|c| {
                         self.find_directional_war_frontier_target(
@@ -2778,6 +3698,14 @@ impl Simulation {
                 if let Some(front) = self.combat_manager.fronts.get_mut(advance.front_index) {
                     if front.is_combat_active {
                         if let Some(remnant) = mop_up_remnant {
+                            if let Some(cell) = last_captured_cell {
+                                front.source_cell_index = cell;
+                                if advance.attacker == front.faction_a {
+                                    front.border_cells_a = vec![cell];
+                                } else {
+                                    front.border_cells_b = vec![cell];
+                                }
+                            }
                             front.target_cell_index = remnant;
                             if advance.attacker == front.faction_a {
                                 front.border_cells_b = vec![remnant];
@@ -2785,6 +3713,14 @@ impl Simulation {
                                 front.border_cells_a = vec![remnant];
                             }
                         } else if let Some(next) = next_target {
+                            if let Some(cell) = last_captured_cell {
+                                front.source_cell_index = cell;
+                                if advance.attacker == front.faction_a {
+                                    front.border_cells_a = vec![cell];
+                                } else {
+                                    front.border_cells_b = vec![cell];
+                                }
+                            }
                             front.target_cell_index = next;
                             if advance.attacker == front.faction_a {
                                 front.border_cells_b = vec![next];
@@ -2882,7 +3818,10 @@ impl Simulation {
         preferred: u32,
     ) -> Option<u32> {
         let front = self.combat_manager.fronts.get(front_index)?;
-        if !front.is_combat_active || front.attacker_faction != attacker {
+        if !front.is_combat_active
+            || !((front.faction_a == attacker && front.faction_b == defender)
+                || (front.faction_b == attacker && front.faction_a == defender))
+        {
             return None;
         }
 
@@ -2895,12 +3834,20 @@ impl Simulation {
         let source_y = (source / WORLD_WIDTH) as f64;
         let intent_x = (intent % WORLD_WIDTH) as f64;
         let intent_y = (intent / WORLD_WIDTH) as f64;
-        let mut direction_x = intent_x - source_x;
-        let mut direction_y = intent_y - source_y;
+        // `normal` is canonical A -> B. Reversing pressure on the same front
+        // must therefore reverse the vector geometrically; it must not reuse
+        // the initiator's compass/intent enum.
+        let side_sign = if attacker == front.faction_a {
+            1.0
+        } else {
+            -1.0
+        };
+        let mut direction_x = front.normal_x as f64 * side_sign;
+        let mut direction_y = front.normal_y as f64 * side_sign;
         let direction_length = (direction_x * direction_x + direction_y * direction_y).sqrt();
         if direction_length <= f64::EPSILON {
-            direction_x = front.normal_x as f64;
-            direction_y = front.normal_y as f64;
+            direction_x = (intent_x - source_x) * side_sign;
+            direction_y = (intent_y - source_y) * side_sign;
         } else {
             direction_x /= direction_length;
             direction_y /= direction_length;
@@ -2911,11 +3858,9 @@ impl Simulation {
         if preferred_index < self.cells.len() && self.cells[preferred_index].owner_id == defender {
             starts.push(preferred_index);
         } else if preferred_index < self.cells.len() {
-            starts.extend(
-                Self::cardinal(preferred_index)
-                    .into_iter()
-                    .filter(|&cell| self.cells[cell].terrain_type == 0 && self.cells[cell].owner_id == defender),
-            );
+            starts.extend(Self::cardinal(preferred_index).into_iter().filter(|&cell| {
+                self.cells[cell].terrain_type == 0 && self.cells[cell].owner_id == defender
+            }));
         }
         if starts.is_empty() {
             starts.push(front.target_cell_index as usize);
@@ -2941,13 +3886,13 @@ impl Simulation {
             let dy = y as f64 - source_y;
             let theatre_distance = dx.abs() + dy.abs();
             if theatre_distance <= WAR_THEATRE_RADIUS as f64 {
-                let has_attacker_neighbour = Self::cardinal(cell)
-                    .into_iter()
-                    .any(|neighbor| self.cells[neighbor].terrain_type == 0 && self.cells[neighbor].owner_id == attacker);
+                let has_attacker_neighbour = Self::cardinal(cell).into_iter().any(|neighbor| {
+                    self.cells[neighbor].terrain_type == 0
+                        && self.cells[neighbor].owner_id == attacker
+                });
                 if has_attacker_neighbour {
                     let forward = dx * direction_x + dy * direction_y;
                     let lateral = (dx * direction_y - dy * direction_x).abs();
-                    let intent_distance = ((x as f64 - intent_x).powi(2) + (y as f64 - intent_y).powi(2)).sqrt();
                     let local_distance = distance as f64;
                     let compact_neighbours = Self::cardinal(cell)
                         .into_iter()
@@ -2955,10 +3900,7 @@ impl Simulation {
                         .count() as f64;
                     // Forward pressure dominates national-border length. The
                     // deterministic cell index tie-break avoids jitter.
-                    let score = forward * 7.0
-                        - lateral * 2.25
-                        - intent_distance * 0.18
-                        - local_distance * 0.08
+                    let score = forward * 7.0 - lateral * 2.25 - local_distance * 0.08
                         + compact_neighbours * 0.35;
                     candidates.push((score, cell));
                 }
@@ -2984,6 +3926,143 @@ impl Simulation {
                 .then_with(|| cell_a.cmp(cell_b))
         });
         candidates.first().map(|(_, cell)| *cell as u32)
+    }
+
+    /// Recover a stale local wavefront from the same side's connected land.
+    ///
+    /// This runs only after the usual target-directed search has found no
+    /// candidate.  Its bounded traversal prevents a successful local push
+    /// from dying merely because its last remembered enemy cell was already
+    /// captured, while still keeping disconnected theatres independent.
+    fn reanchor_local_war_front(
+        &mut self,
+        front_index: usize,
+        attacker: u8,
+        defender: u8,
+    ) -> Option<u32> {
+        let front = self.combat_manager.fronts.get(front_index)?;
+        if !front.is_combat_active
+            || front.operation_kind != "LAND_OFFENSIVE"
+            || !((front.faction_a == attacker && front.faction_b == defender)
+                || (front.faction_b == attacker && front.faction_a == defender))
+        {
+            return None;
+        }
+
+        let anchor = front.source_cell_index as usize;
+        let side_sign = if attacker == front.faction_a {
+            1.0
+        } else {
+            -1.0
+        };
+        let mut direction_x = front.normal_x as f64 * side_sign;
+        let mut direction_y = front.normal_y as f64 * side_sign;
+        let length = (direction_x * direction_x + direction_y * direction_y).sqrt();
+        if length <= f64::EPSILON {
+            let intent = front.intent_target_cell_index as usize;
+            if anchor >= self.cells.len() || intent >= self.cells.len() {
+                return None;
+            }
+            direction_x = (intent % WORLD_WIDTH) as f64 - (anchor % WORLD_WIDTH) as f64;
+            direction_y = (intent / WORLD_WIDTH) as f64 - (anchor / WORLD_WIDTH) as f64;
+        } else {
+            direction_x /= length;
+            direction_y /= length;
+        }
+        let direction_length = (direction_x * direction_x + direction_y * direction_y).sqrt();
+        if direction_length <= f64::EPSILON {
+            return None;
+        }
+        direction_x /= direction_length;
+        direction_y /= direction_length;
+
+        // Start only from cells demonstrably still owned by this side of this
+        // operation.  A stale source can occur after the opposing side has
+        // pushed back, so retain the recorded boundary as legal fallback.
+        let mut starts = Vec::with_capacity(4);
+        if anchor < self.cells.len() && self.cells[anchor].owner_id == attacker {
+            starts.push(anchor);
+        }
+        let own_boundary = if attacker == front.faction_a {
+            &front.border_cells_a
+        } else {
+            &front.border_cells_b
+        };
+        for &cell in own_boundary {
+            let index = cell as usize;
+            if index < self.cells.len() && self.cells[index].owner_id == attacker {
+                starts.push(index);
+            }
+        }
+        starts.sort_unstable();
+        starts.dedup();
+        if starts.is_empty() {
+            return None;
+        }
+
+        let anchor_x = (anchor % WORLD_WIDTH) as f64;
+        let anchor_y = (anchor / WORLD_WIDTH) as f64;
+        let mut queue: VecDeque<(usize, i32)> = starts.into_iter().map(|cell| (cell, 0)).collect();
+        let mut seen: HashSet<usize> = queue.iter().map(|(cell, _)| *cell).collect();
+        let mut best: Option<(f64, usize, usize)> = None;
+
+        while let Some((own_cell, distance)) = queue.pop_front() {
+            let own_x = (own_cell % WORLD_WIDTH) as f64;
+            let own_y = (own_cell / WORLD_WIDTH) as f64;
+            let dx = own_x - anchor_x;
+            let dy = own_y - anchor_y;
+            if dx.abs() + dy.abs() > WAR_THEATRE_RADIUS as f64 {
+                continue;
+            }
+
+            for enemy_cell in Self::cardinal(own_cell) {
+                if self.cells[enemy_cell].terrain_type != 0
+                    || self.cells[enemy_cell].owner_id != defender
+                {
+                    continue;
+                }
+                let enemy_x = (enemy_cell % WORLD_WIDTH) as f64;
+                let enemy_y = (enemy_cell / WORLD_WIDTH) as f64;
+                let forward =
+                    (enemy_x - anchor_x) * direction_x + (enemy_y - anchor_y) * direction_y;
+                let lateral =
+                    ((enemy_x - anchor_x) * direction_y - (enemy_y - anchor_y) * direction_x).abs();
+                let score = forward * 7.0 - lateral * 2.25 - distance as f64 * 0.08;
+                let candidate = (score, own_cell, enemy_cell);
+                if best.as_ref().is_none_or(|current| {
+                    candidate.0 > current.0 || (candidate.0 == current.0 && candidate.2 < current.2)
+                }) {
+                    best = Some(candidate);
+                }
+            }
+
+            if distance >= WAR_THEATRE_RADIUS {
+                continue;
+            }
+            for next in Self::cardinal(own_cell) {
+                if self.cells[next].terrain_type == 0
+                    && self.cells[next].owner_id == attacker
+                    && seen.insert(next)
+                {
+                    queue.push_back((next, distance + 1));
+                }
+            }
+        }
+
+        let (_, source, target) = best?;
+        let front = self.combat_manager.fronts.get_mut(front_index)?;
+        front.source_cell_index = source as u32;
+        front.target_cell_index = target as u32;
+        front.centroid_x = ((source % WORLD_WIDTH) as f32 + (target % WORLD_WIDTH) as f32) * 0.5;
+        front.centroid_y = ((source / WORLD_WIDTH) as f32 + (target / WORLD_WIDTH) as f32) * 0.5;
+        if attacker == front.faction_a {
+            front.border_cells_a = vec![source as u32];
+            front.border_cells_b = vec![target as u32];
+        } else {
+            front.border_cells_b = vec![source as u32];
+            front.border_cells_a = vec![target as u32];
+        }
+        Some(target as u32)
     }
 
     pub fn get_snapshot_cells(&self) -> Vec<CellState> {
@@ -3016,10 +4095,17 @@ impl Simulation {
         for faction in &self.factions {
             let observed = observed_land[faction.faction_id as usize];
             if observed != faction.territory_count {
-                return Err(format!("land_count:{}:{}:{}", faction.faction_id, observed, faction.territory_count));
+                return Err(format!(
+                    "land_count:{}:{}:{}",
+                    faction.faction_id, observed, faction.territory_count
+                ));
             }
             if faction.is_eliminated {
-                if observed != 0 || faction.population != 0.0 || faction.population_growth_per_second != 0.0 || faction.deployed_population != 0.0 {
+                if observed != 0
+                    || faction.population != 0.0
+                    || faction.population_growth_per_second != 0.0
+                    || faction.deployed_population != 0.0
+                {
                     return Err(format!("elimination_state:{}", faction.faction_id));
                 }
             } else if faction.population < -0.0001
@@ -3052,16 +4138,15 @@ impl Simulation {
                 front.faction_a
             };
             if (defender as usize) < expected_deployed.len() {
-                expected_deployed[defender as usize] =
-                    (expected_deployed[defender as usize]
-                        - front.defense_focus_population
-                        - front.shared_local_force_population)
+                expected_deployed[defender as usize] = (expected_deployed[defender as usize]
+                    - front.shared_local_force_population)
                     .max(0.0);
             }
         }
         for faction in &self.factions {
-            if (faction.deployed_population - expected_deployed[faction.faction_id as usize]).abs() > 0.01
-                || (faction.total_living_population - faction.population - faction.deployed_population).abs() > 0.01
+            if (faction.deployed_population - expected_deployed[faction.faction_id as usize]).abs()
+                > 0.01
+                || (faction.total_living_population - faction.population).abs() > 0.01
             {
                 return Err(format!("population_ledger:{}", faction.faction_id));
             }
@@ -3078,7 +4163,7 @@ impl Simulation {
             } else {
                 front.faction_a
             };
-            if !self.is_faction_alive(defender) {
+            if defender != 0 && !self.is_faction_alive(defender) {
                 return Err(format!("orphan_defender_front:{}", front.front_id));
             }
         }
@@ -3310,10 +4395,18 @@ mod legacy_tests {
     fn war_advance_order_is_deterministic_and_starts_at_target() {
         let sim = Simulation::new(1);
         let center = 10 * WORLD_WIDTH + 100;
-        let cells: Vec<u32> = vec![center - 1, center, center + 1, center + WORLD_WIDTH, center + WORLD_WIDTH * 2, center + WORLD_WIDTH * 2 + 1, center + WORLD_WIDTH * 2 + 2]
-            .into_iter()
-            .map(|cell| cell as u32)
-            .collect();
+        let cells: Vec<u32> = vec![
+            center - 1,
+            center,
+            center + 1,
+            center + WORLD_WIDTH,
+            center + WORLD_WIDTH * 2,
+            center + WORLD_WIDTH * 2 + 1,
+            center + WORLD_WIDTH * 2 + 2,
+        ]
+        .into_iter()
+        .map(|cell| cell as u32)
+        .collect();
         let ordered = sim.order_war_advance_cells(&cells, center as u32);
         assert_eq!(ordered.first().copied(), Some(center as u32));
         assert_eq!(ordered.len(), cells.len());
@@ -3403,7 +4496,10 @@ mod legacy_tests {
 
         let order = sim.process_attack_command(1, source as u32, target as u32, 0.5);
         assert!(order.is_ok());
-        assert_eq!(sim.active_front_for_attacker(1), Some(order.unwrap().front_id));
+        assert_eq!(
+            sim.active_front_for_attacker(1),
+            Some(order.unwrap().front_id)
+        );
         assert_eq!(
             sim.process_attack_command(1, source as u32, target as u32, 0.5),
             Err("attack_already_active".to_string())
@@ -3422,12 +4518,27 @@ mod legacy_tests {
         sim.factions[0].army = 160.0;
         sim.factions[2].army = 160.0;
 
-        assert!(sim.process_attack_command(1, center as u32, east as u32, 0.5).is_ok());
-        assert!(sim.process_attack_command(3, south as u32, center as u32, 0.5).is_ok());
-        assert_eq!(sim.combat_manager.fronts.iter().filter(|front| front.is_combat_active).count(), 2);
+        assert!(sim
+            .process_attack_command(1, center as u32, east as u32, 0.5)
+            .is_ok());
+        assert!(sim
+            .process_attack_command(3, south as u32, center as u32, 0.5)
+            .is_ok());
+        assert_eq!(
+            sim.combat_manager
+                .fronts
+                .iter()
+                .filter(|front| front.is_combat_active)
+                .count(),
+            2
+        );
         sim.step_dt(0.5);
         let invariant = sim.validate_invariants();
-        assert!(invariant.is_ok(), "population ledger invariant: {:?}", invariant);
+        assert!(
+            invariant.is_ok(),
+            "population ledger invariant: {:?}",
+            invariant
+        );
     }
 
     #[test]
@@ -3438,8 +4549,15 @@ mod legacy_tests {
         assert!(sim.set_cell_owner(source as u32, 1));
         assert!(sim.set_cell_owner(target as u32, 2));
         sim.factions[0].army = 160.0;
-        let order = sim.process_attack_command(1, source as u32, target as u32, 0.5).unwrap();
-        let front_index = sim.combat_manager.fronts.iter().position(|front| front.front_id == order.front_id).unwrap();
+        let order = sim
+            .process_attack_command(1, source as u32, target as u32, 0.5)
+            .unwrap();
+        let front_index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .unwrap();
         sim.pending_war_advances.push(PendingWarAdvance {
             front_index,
             attacker: 1,
@@ -3450,7 +4568,10 @@ mod legacy_tests {
         assert!(sim.cancel_attack(1, order.front_id).is_ok());
         sim.step_dt(1.0);
         assert_eq!(sim.cells[target].owner_id, 2);
-        assert_eq!(sim.combat_manager.fronts[front_index].termination_reason, "CANCELLED");
+        assert_eq!(
+            sim.combat_manager.fronts[front_index].termination_reason,
+            "CANCELLED"
+        );
     }
 
     #[test]
@@ -3479,64 +4600,122 @@ mod population_tests {
     use super::*;
 
     fn adjacent_neutral(sim: &Simulation, owner: u8) -> u32 {
-        (0..sim.cells.len()).find(|&i| {
-            sim.cells[i].owner_id == 0 && sim.cells[i].terrain_type == 0 &&
-            Simulation::cardinal(i).into_iter().any(|n| sim.cells[n].owner_id == owner)
-        }).expect("adjacent neutral cell") as u32
+        (0..sim.cells.len())
+            .find(|&i| {
+                sim.cells[i].owner_id == 0
+                    && sim.cells[i].terrain_type == 0
+                    && Simulation::cardinal(i)
+                        .into_iter()
+                        .any(|n| sim.cells[n].owner_id == owner)
+            })
+            .expect("adjacent neutral cell") as u32
     }
 
     fn adjacent_enemy(sim: &Simulation, attacker: u8, defender: u8) -> (u32, u32) {
-        (0..sim.cells.len()).find_map(|i| {
-            if sim.cells[i].owner_id != attacker || sim.cells[i].terrain_type != 0 { return None; }
-            Simulation::cardinal(i).into_iter().find_map(|n| {
-                (sim.cells[n].owner_id == defender).then_some((i as u32, n as u32))
+        (0..sim.cells.len())
+            .find_map(|i| {
+                if sim.cells[i].owner_id != attacker || sim.cells[i].terrain_type != 0 {
+                    return None;
+                }
+                Simulation::cardinal(i).into_iter().find_map(|n| {
+                    (sim.cells[n].owner_id == defender).then_some((i as u32, n as u32))
+                })
             })
-        }).expect("adjacent enemy cells")
+            .expect("adjacent enemy cells")
     }
 
     fn make_enemy_pair(sim: &mut Simulation, attacker: u8, defender: u8) -> (u32, u32) {
         for i in 0..sim.cells.len() {
             if sim.cells[i].owner_id == attacker {
-                if let Some(n) = Simulation::cardinal(i).into_iter().find(|&n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == defender) {
+                if let Some(n) = Simulation::cardinal(i)
+                    .into_iter()
+                    .find(|&n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == defender)
+                {
                     return (i as u32, n as u32);
                 }
             }
         }
-        let source = (0..sim.cells.len()).find(|&i| {
-            sim.cells[i].owner_id == attacker
-                && Simulation::cardinal(i).into_iter().any(|n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == 0)
-        }).expect("frontier source");
-        let target = Simulation::cardinal(source).into_iter().find(|&n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == 0).expect("frontier target");
+        let source = (0..sim.cells.len())
+            .find(|&i| {
+                sim.cells[i].owner_id == attacker
+                    && Simulation::cardinal(i)
+                        .into_iter()
+                        .any(|n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == 0)
+            })
+            .expect("frontier source");
+        let target = Simulation::cardinal(source)
+            .into_iter()
+            .find(|&n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id == 0)
+            .expect("frontier target");
         assert!(sim.set_cell_owner(target as u32, defender));
         (source as u32, target as u32)
+    }
+
+    fn canonical_overseas_pair(sim: &mut Simulation, owner: u8) -> (u32, u32) {
+        let port = sim
+            .strategic_sites
+            .iter()
+            .find(|site| site.kind == "PORT" && sim.is_coastal_cell(site.cell_a))
+            .map(|site| site.cell_a)
+            .expect("marked coastal port site");
+        let target = (0..sim.cells.len())
+            .find(|&index| {
+                sim.meaningful_overseas_land_mask[index] == 1
+                    && sim.cells[index].owner_id == 0
+                    && sim.is_coastal_cell(index as u32)
+            })
+            .expect("classified meaningful neutral landing coast") as u32;
+        assert!(sim.set_cell_owner(port, owner));
+        sim.factions
+            .iter_mut()
+            .find(|faction| faction.faction_id == owner)
+            .unwrap()
+            .population = 10_000.0;
+        sim.refresh_all_economies();
+        (port, target)
     }
 
     fn frontier_cell(sim: &Simulation, owner: u8) -> u32 {
         (0..sim.cells.len())
             .find(|&i| {
                 sim.cells[i].owner_id == owner
-                    && Simulation::cardinal(i).into_iter().any(|n| {
-                        sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id != owner
-                    })
+                    && Simulation::cardinal(i)
+                        .into_iter()
+                        .any(|n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id != owner)
             })
             .expect("frontier cell") as u32
     }
 
     #[test]
-    fn population_deployment_reduces_pool_but_living_total_includes_deployed() {
+    fn population_commitment_reduces_the_one_strategic_population_pool() {
         let mut sim = Simulation::new(2);
-        let source = (0..sim.cells.len()).find(|&i| {
-            sim.cells[i].owner_id == 1 && Simulation::cardinal(i).into_iter().any(|n| sim.cells[n].owner_id == 0 && sim.cells[n].terrain_type == 0)
-        }).unwrap();
-        let target = Simulation::cardinal(source).into_iter().find(|&n| sim.cells[n].owner_id == 0 && sim.cells[n].terrain_type == 0).unwrap() as u32;
+        let source = (0..sim.cells.len())
+            .find(|&i| {
+                sim.cells[i].owner_id == 1
+                    && Simulation::cardinal(i)
+                        .into_iter()
+                        .any(|n| sim.cells[n].owner_id == 0 && sim.cells[n].terrain_type == 0)
+            })
+            .unwrap();
+        let target = Simulation::cardinal(source)
+            .into_iter()
+            .find(|&n| sim.cells[n].owner_id == 0 && sim.cells[n].terrain_type == 0)
+            .unwrap() as u32;
         sim.cells[target as usize].owner_id = 2;
         sim.factions[1].territory_count += 1;
         sim.factions[0].population = sim.factions[0].population_capacity;
         sim.refresh_all_economies();
         let living_before = sim.factions[0].total_living_population;
-        let out = sim.process_attack_command(1, source as u32, target, 0.25).unwrap();
+        let out = sim
+            .process_attack_command(1, source as u32, target, 0.25)
+            .unwrap();
         assert!(sim.factions[0].population < living_before);
-        assert!((sim.factions[0].total_living_population - living_before).abs() < 0.01);
+        assert!(
+            (sim.factions[0].total_living_population - sim.factions[0].population).abs() < 0.01
+        );
+        assert!(
+            (living_before - sim.factions[0].population - out.deployed_population).abs() < 0.01
+        );
         assert!(out.deployed_population > 0.0);
     }
 
@@ -3546,50 +4725,107 @@ mod population_tests {
         sim.factions[0].population = 1_000_000.0;
         let mut points = Vec::new();
         for i in 1..sim.cells.len() {
-            if sim.cells[i].terrain_type != 0 || sim.cells[i].owner_id != 0 { continue; }
+            if sim.cells[i].terrain_type != 0 || sim.cells[i].owner_id != 0 {
+                continue;
+            }
             if points.iter().any(|(_, target): &(u32, u32)| {
                 let target = *target as usize;
-                (i % WORLD_WIDTH).abs_diff(target % WORLD_WIDTH) + (i / WORLD_WIDTH).abs_diff(target / WORLD_WIDTH) <= 3
-            }) { continue; }
-            let owner_neighbor = Simulation::cardinal(i).into_iter().find(|&n| sim.cells[n].owner_id == 1);
+                (i % WORLD_WIDTH).abs_diff(target % WORLD_WIDTH)
+                    + (i / WORLD_WIDTH).abs_diff(target / WORLD_WIDTH)
+                    <= 3
+            }) {
+                continue;
+            }
+            let owner_neighbor = Simulation::cardinal(i)
+                .into_iter()
+                .find(|&n| sim.cells[n].owner_id == 1);
             if let Some(source) = owner_neighbor {
                 sim.cells[i].owner_id = 2;
                 points.push((source as u32, i as u32));
-                if points.len() == 3 { break; }
+                if points.len() == 3 {
+                    break;
+                }
             }
         }
         assert!(points.len() >= 3);
-        let first = sim.process_attack_command(1, points[0].0, points[0].1, 0.1).unwrap();
-        let second = sim.process_attack_command(1, points[1].0, points[1].1, 0.1).unwrap();
-        let third = sim.process_attack_command(1, points[2].0, points[2].1, 0.1).unwrap();
+        let first = sim
+            .process_attack_command(1, points[0].0, points[0].1, 0.1)
+            .unwrap();
+        let second = sim
+            .process_attack_command(1, points[1].0, points[1].1, 0.1)
+            .unwrap();
+        let third = sim
+            .process_attack_command(1, points[2].0, points[2].1, 0.1)
+            .unwrap();
         assert_ne!(first.front_id, second.front_id);
         assert_ne!(second.front_id, third.front_id);
-        assert_eq!(sim.combat_manager.fronts.iter().filter(|f| f.is_combat_active).count(), 3);
+        assert_eq!(
+            sim.combat_manager
+                .fronts
+                .iter()
+                .filter(|f| f.is_combat_active)
+                .count(),
+            3
+        );
     }
 
     #[test]
     fn same_enemy_at_two_border_points_keeps_two_spatial_operations() {
         let mut sim = Simulation::new(3);
-        sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().population = 1_000_000.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .population = 1_000_000.0;
         let mut points = Vec::new();
         for index in 0..sim.cells.len() {
-            if sim.cells[index].owner_id != 0 || sim.cells[index].terrain_type != 0 { continue; }
-            let Some(source) = Simulation::cardinal(index).into_iter().find(|&n| sim.cells[n].owner_id == 1) else { continue };
+            if sim.cells[index].owner_id != 0 || sim.cells[index].terrain_type != 0 {
+                continue;
+            }
+            let Some(source) = Simulation::cardinal(index)
+                .into_iter()
+                .find(|&n| sim.cells[n].owner_id == 1)
+            else {
+                continue;
+            };
             if points.iter().any(|(_, target): &(u32, u32)| {
                 let target = *target as usize;
-                (index % WORLD_WIDTH).abs_diff(target % WORLD_WIDTH) + (index / WORLD_WIDTH).abs_diff(target / WORLD_WIDTH) <= 3
-            }) { continue; }
+                (index % WORLD_WIDTH).abs_diff(target % WORLD_WIDTH)
+                    + (index / WORLD_WIDTH).abs_diff(target / WORLD_WIDTH)
+                    <= 3
+            }) {
+                continue;
+            }
             assert!(sim.set_cell_owner(index as u32, 2));
             points.push((source as u32, index as u32));
-            if points.len() == 2 { break; }
+            if points.len() == 2 {
+                break;
+            }
         }
         assert_eq!(points.len(), 2);
-        let a = sim.process_attack_command(1, points[0].0, points[0].1, 0.1).unwrap();
-        let b = sim.process_attack_command(1, points[1].0, points[1].1, 0.1).unwrap();
-        let front_a = sim.combat_manager.fronts.iter().find(|f| f.front_id == a.front_id).unwrap();
-        let front_b = sim.combat_manager.fronts.iter().find(|f| f.front_id == b.front_id).unwrap();
+        let a = sim
+            .process_attack_command(1, points[0].0, points[0].1, 0.1)
+            .unwrap();
+        let b = sim
+            .process_attack_command(1, points[1].0, points[1].1, 0.1)
+            .unwrap();
+        let front_a = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == a.front_id)
+            .unwrap();
+        let front_b = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == b.front_id)
+            .unwrap();
         assert_ne!(front_a.target_cell_index, front_b.target_cell_index);
-        assert_ne!((front_a.centroid_x, front_a.centroid_y), (front_b.centroid_x, front_b.centroid_y));
+        assert_ne!(
+            (front_a.centroid_x, front_a.centroid_y),
+            (front_b.centroid_x, front_b.centroid_y)
+        );
     }
 
     #[test]
@@ -3606,21 +4842,44 @@ mod population_tests {
         }
         sim.factions[0].population = 100_000.0;
         sim.factions[1].population = 100_000.0;
-        let first = sim.process_attack_command(1, base as u32, (base + WORLD_WIDTH) as u32, 0.1).unwrap();
+        let first = sim
+            .process_attack_command(1, base as u32, (base + WORLD_WIDTH) as u32, 0.1)
+            .unwrap();
         let defender_pool = sim.factions[1].population;
-        let second = sim.process_attack_command(1, (base + 2) as u32, (base + WORLD_WIDTH + 2) as u32, 0.1).unwrap();
+        let second = sim
+            .process_attack_command(1, (base + 2) as u32, (base + WORLD_WIDTH + 2) as u32, 0.1)
+            .unwrap();
         assert_eq!(first.front_id, second.front_id);
         assert_eq!(sim.factions[0].population, 81_000.0);
-        assert_eq!(sim.factions[1].population, defender_pool, "merging must not deploy emergency defense twice");
-        let front = sim.combat_manager.fronts.iter().find(|f| f.front_id == first.front_id).unwrap();
+        assert_eq!(
+            sim.factions[1].population, defender_pool,
+            "merging must not deploy emergency defense twice"
+        );
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == first.front_id)
+            .unwrap();
         assert_eq!(front.deployed_population_a, 19_000.0);
-        assert_eq!(front.target_cell_index, (base + WORLD_WIDTH) as u32, "merge preserves the existing operation path");
-        let far = sim.process_attack_command(1, (base + 8) as u32, (base + WORLD_WIDTH + 8) as u32, 0.1).unwrap();
+        assert_eq!(
+            front.target_cell_index,
+            (base + WORLD_WIDTH) as u32,
+            "merge preserves the existing operation path"
+        );
+        let far = sim
+            .process_attack_command(1, (base + 8) as u32, (base + WORLD_WIDTH + 8) as u32, 0.1)
+            .unwrap();
         assert_ne!(first.front_id, far.front_id);
         sim.cells[base + WORLD_WIDTH + 1].terrain_type = 2;
         sim.cells[base + WORLD_WIDTH + 1].owner_id = 0;
-        let separated = sim.process_attack_command(1, (base + 2) as u32, (base + WORLD_WIDTH + 2) as u32, 0.1).unwrap();
-        assert_ne!(first.front_id, separated.front_id, "water must separate nearby fronts");
+        let separated = sim
+            .process_attack_command(1, (base + 2) as u32, (base + WORLD_WIDTH + 2) as u32, 0.1)
+            .unwrap();
+        assert_ne!(
+            first.front_id, separated.front_id,
+            "water must separate nearby fronts"
+        );
         let before_halt = sim.factions[0].population;
         sim.cancel_attack(1, first.front_id).unwrap();
         assert!((sim.factions[0].population - before_halt).abs() < 0.01);
@@ -3633,35 +4892,161 @@ mod population_tests {
         let (source, target) = make_enemy_pair(&mut sim, 1, 2);
         sim.factions[0].population = 100_000.0;
         let order = sim.process_attack_command(1, source, target, 0.87).unwrap();
-        let after_first_order = sim.factions.iter().find(|f| f.faction_id == 1).unwrap().population;
-        sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().population = 50_000.0;
+        let after_first_order = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .population;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .population = 50_000.0;
         let added = sim.reinforce_front(1, order.front_id, 1.0).unwrap();
-        let front = sim.combat_manager.fronts.iter().find(|f| f.front_id == order.front_id).unwrap();
-        let attacker_force = if front.faction_a == 1 { front.deployed_population_a } else { front.deployed_population_b };
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == order.front_id)
+            .unwrap();
+        let attacker_force = if front.faction_a == 1 {
+            front.deployed_population_a
+        } else {
+            front.deployed_population_b
+        };
         assert!((added - 50_000.0).abs() < 0.01);
-        assert!((attacker_force - 137_000.0).abs() < 0.01, "front force was {}", attacker_force);
+        assert!(
+            (attacker_force - 137_000.0).abs() < 0.01,
+            "front force was {}",
+            attacker_force
+        );
         assert!((after_first_order - 13_000.0).abs() < 0.01);
-        assert!((sim.factions.iter().find(|f| f.faction_id == 1).unwrap().population).abs() < 0.01);
+        assert!(
+            (sim.factions
+                .iter()
+                .find(|f| f.faction_id == 1)
+                .unwrap()
+                .population)
+                .abs()
+                < 0.01
+        );
     }
 
     #[test]
-    fn existing_offensive_force_is_shared_local_defense_without_double_spend() {
+    fn reverse_order_reinforces_the_same_mutual_local_front() {
         let mut sim = Simulation::new(2);
         let (source, target) = make_enemy_pair(&mut sim, 1, 2);
-        sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().population = 80_000.0;
-        sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().population = 80_000.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .population = 80_000.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .population = 80_000.0;
         let first = sim.process_attack_command(2, target, source, 0.25).unwrap();
         let second = sim.process_attack_command(1, source, target, 0.25).unwrap();
-        let counter = sim.combat_manager.fronts.iter().find(|f| f.front_id == second.front_id).unwrap();
-        assert!(counter.shared_local_force_population > 0.0);
-        let f2_deployed: f64 = sim.combat_manager.fronts.iter().filter(|f| f.is_combat_active && f.attacker_faction == 2).map(|f| if f.faction_a == 2 { f.deployed_population_a } else { f.deployed_population_b }).sum();
+        let counter = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == second.front_id)
+            .unwrap();
+        assert_eq!(first.front_id, second.front_id);
+        assert_eq!(
+            sim.combat_manager
+                .fronts
+                .iter()
+                .filter(|front| front.is_combat_active)
+                .count(),
+            1,
+            "reverse pressure must not create an overlapping battle"
+        );
+        assert!(counter.deployed_population_a > 0.0);
+        assert!(counter.deployed_population_b > 0.0);
+        let f2_deployed: f64 = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .filter(|f| f.is_combat_active && (f.faction_a == 2 || f.faction_b == 2))
+            .map(|f| {
+                if f.faction_a == 2 {
+                    f.deployed_population_a
+                } else {
+                    f.deployed_population_b
+                }
+            })
+            .sum();
         let f2 = sim.factions.iter().find(|f| f.faction_id == 2).unwrap();
-        assert!((f2.deployed_population - f2_deployed).abs() < 0.01, "deployed ledger duplicated shared force: ledger={} offensive={}", f2.deployed_population, f2_deployed);
-        assert!(first.front_id != second.front_id);
+        assert!(
+            (f2.deployed_population - f2_deployed).abs() < 0.01,
+            "deployed ledger duplicated shared force: ledger={} offensive={}",
+            f2.deployed_population,
+            f2_deployed
+        );
     }
 
     #[test]
-    fn defense_focus_reserves_real_population_and_release_returns_it() {
+    fn mutual_front_stalls_when_balanced_then_reacts_to_each_sides_reinforcement() {
+        let mut sim = Simulation::new(2);
+        let (source, target) = make_enemy_pair(&mut sim, 1, 2);
+        sim.factions[0].population = 100_000.0;
+        sim.factions[1].population = 100_000.0;
+        let order = sim.process_attack_command(1, source, target, 0.20).unwrap();
+
+        // Match A's 20k with B's 7.5k emergency response plus a reverse
+        // commitment into the same operation.
+        let reverse = sim
+            .process_attack_command(2, target, source, 0.1352)
+            .unwrap();
+        assert_eq!(order.front_id, reverse.front_id);
+        let index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .unwrap();
+        sim.combat_manager.fronts[index].deployed_population_a = 20_000.0;
+        sim.combat_manager.fronts[index].deployed_population_b = 20_000.0;
+        sim.factions[0].capital_cell = source;
+        sim.factions[1].capital_cell = target;
+        sim.refresh_supply_connectivity();
+        sim.cell_consolidation[source as usize] = 0.5;
+        sim.cell_consolidation[target as usize] = 0.5;
+        for _ in 0..40 {
+            sim.step_dt(0.05);
+        }
+        let balanced_pressure = sim.combat_manager.fronts[index].pressure;
+        assert!(
+            balanced_pressure.abs() < 0.20,
+            "balanced pressure drifted to {}",
+            balanced_pressure
+        );
+
+        sim.reinforce_front(1, order.front_id, 0.30).unwrap();
+        for _ in 0..80 {
+            sim.step_dt(0.05);
+        }
+        let pressure_after_a = sim.combat_manager.fronts[index].pressure;
+        assert!(pressure_after_a > balanced_pressure + 0.05);
+
+        sim.reinforce_front(2, order.front_id, 0.65).unwrap();
+        for _ in 0..140 {
+            sim.step_dt(0.05);
+        }
+        let front = &sim.combat_manager.fronts[index];
+        assert!(
+            front.pressure < pressure_after_a,
+            "counterpressure did not bend the shared front"
+        );
+        assert!(sim.validate_invariants().is_ok());
+    }
+
+    #[test]
+    fn defense_focus_is_a_permanent_commitment_even_when_released() {
         let mut sim = Simulation::new(1);
         let own = frontier_cell(&sim, 1);
         sim.factions[0].population = sim.factions[0].population_capacity;
@@ -3670,13 +5055,16 @@ mod population_tests {
         assert_eq!(sim.factions[0].population, before - 4_000.0);
         assert_eq!(sim.factions[0].deployed_population, 4_000.0);
         sim.release_defense_focus(1, own).unwrap();
-        assert!((sim.factions[0].population - before).abs() < 0.01);
+        assert!((sim.factions[0].population - (before - 4_000.0)).abs() < 0.01);
+        assert!(sim.factions[0].deployed_population.abs() < 0.01);
     }
 
     #[test]
     fn growth_uses_total_living_population_and_near_capacity_is_quiet() {
         let mut sim = Simulation::new(1);
-        for c in &mut sim.cell_consolidation { *c = 1.0; }
+        for c in &mut sim.cell_consolidation {
+            *c = 1.0;
+        }
         sim.recompute_area_stats();
         sim.refresh_all_economies();
         let capacity = sim.factions[0].population_capacity;
@@ -3696,9 +5084,17 @@ mod population_tests {
         let high_latitude = Simulation::cell_area_km2(64 * WORLD_WIDTH + 512);
         assert!(equator > high_latitude);
         let sim = Simulation::new(101);
-        let owned: usize = sim.cells.iter().filter(|c| c.terrain_type == 0 && c.owner_id > 0).count();
+        let owned: usize = sim
+            .cells
+            .iter()
+            .filter(|c| c.terrain_type == 0 && c.owner_id > 0)
+            .count();
         let owned_ratio = owned as f64 / sim.total_land_cells as f64;
-        assert!((0.001..=0.05).contains(&owned_ratio), "sparse start ratio was {:.3}", owned_ratio);
+        assert!(
+            (0.001..=0.05).contains(&owned_ratio),
+            "sparse start ratio was {:.3}",
+            owned_ratio
+        );
         assert_eq!(sim.factions.len(), 101);
         assert!(sim.validate_invariants().is_ok());
     }
@@ -3707,11 +5103,18 @@ mod population_tests {
     fn custom_human_is_faction_101_and_doctrine_presets_are_zero_sum() {
         let sim = Simulation::new(101);
         assert_eq!(sim.factions.len(), 101);
-        let human = sim.factions.iter().find(|f| f.is_human).expect("custom human");
+        let human = sim
+            .factions
+            .iter()
+            .find(|f| f.is_human)
+            .expect("custom human");
         assert_eq!(human.faction_id, PLAYER_FACTION_ID);
         assert_eq!(human.nation_preset_id, "custom");
         for faction in &sim.factions {
-            let sum = faction.doctrine_offense + faction.doctrine_defense + faction.doctrine_expansion + faction.doctrine_maritime;
+            let sum = faction.doctrine_offense
+                + faction.doctrine_defense
+                + faction.doctrine_expansion
+                + faction.doctrine_maritime;
             assert!(sum.abs() < 0.0001);
             assert!(faction.doctrine_offense.abs() <= 0.0601);
             assert!(faction.flag_descriptor.is_some());
@@ -3720,7 +5123,7 @@ mod population_tests {
     }
 
     #[test]
-    fn deploying_everyone_does_not_create_growth_or_duplicate_living_people() {
+    fn committing_everyone_does_not_leave_a_hidden_refundable_population_pool() {
         let mut sim = Simulation::new(2);
         let (source, target) = make_enemy_pair(&mut sim, 1, 2);
         sim.factions[0].effective_controlled_area_km2 = sim.factions[0].controlled_area_km2;
@@ -3730,35 +5133,66 @@ mod population_tests {
         let total_before = sim.factions[0].total_living_population;
         let order = sim.process_attack_command(1, source, target, 1.0).unwrap();
         assert!(sim.factions[0].population.abs() < 0.01);
-        assert!((sim.factions[0].total_living_population - total_before).abs() < 0.01);
+        assert!(sim.factions[0].total_living_population.abs() < 0.01);
         sim.step_dt(5.0);
-        assert!(sim.factions[0].total_living_population <= total_before + 0.01);
+        assert!(
+            (sim.factions[0].total_living_population - sim.factions[0].population).abs() < 0.01
+        );
+        assert!(sim.factions[0].total_living_population < total_before);
         let invariant = sim.validate_invariants();
-        assert!(invariant.is_ok(), "population ledger invariant: {:?}", invariant);
+        assert!(
+            invariant.is_ok(),
+            "population ledger invariant: {:?}",
+            invariant
+        );
         sim.cancel_attack(1, order.front_id).unwrap();
-        assert!(sim.factions[0].total_living_population <= total_before + 0.01);
+        assert!(
+            (sim.factions[0].total_living_population - sim.factions[0].population).abs() < 0.01
+        );
     }
 
     #[test]
     fn port_cost_is_permanent_and_completion_is_time_based() {
         let mut sim = Simulation::new(1);
-        let port = sim.strategic_sites.iter().find(|site| site.kind == "PORT" && sim.cells[site.cell_a as usize].terrain_type == 0 && sim.is_coastal_cell(site.cell_a)).map(|site| site.cell_a).expect("coastal port site");
+        let port = sim
+            .strategic_sites
+            .iter()
+            .find(|site| {
+                site.kind == "PORT"
+                    && sim.cells[site.cell_a as usize].terrain_type == 0
+                    && sim.is_coastal_cell(site.cell_a)
+            })
+            .map(|site| site.cell_a)
+            .expect("coastal port site");
         assert!(sim.set_cell_owner(port, 1));
         sim.factions[0].population = sim.factions[0].population_capacity;
-        sim.factions[0].population = sim.factions[0].population.min(sim.factions[0].population_capacity);
+        sim.factions[0].population = sim.factions[0]
+            .population
+            .min(sim.factions[0].population_capacity);
         let before = sim.factions[0].population;
         sim.build_port(1, port).unwrap();
         assert!(sim.factions[0].population < before);
         assert_eq!(sim.factions[0].ports_count, 0);
-        let construction = sim.port_states().into_iter().find(|state| state.cell_index == port).expect("visible construction state");
+        let construction = sim
+            .port_states()
+            .into_iter()
+            .find(|state| state.cell_index == port)
+            .expect("visible construction state");
         assert!(!construction.complete);
         assert!((9.9..=10.0).contains(&construction.remaining_seconds));
         sim.step_dt(5.0);
-        let halfway = sim.port_states().into_iter().find(|state| state.cell_index == port).expect("construction remains visible");
+        let halfway = sim
+            .port_states()
+            .into_iter()
+            .find(|state| state.cell_index == port)
+            .expect("construction remains visible");
         assert!((4.8..=5.0).contains(&halfway.remaining_seconds));
         sim.step_dt(5.0);
         assert_eq!(sim.factions[0].ports_count, 1);
-        assert!(sim.port_states().iter().any(|state| state.cell_index == port && state.complete));
+        assert!(sim
+            .port_states()
+            .iter()
+            .any(|state| state.cell_index == port && state.complete));
         let after_completion = sim.factions[0].population;
         sim.step_dt(10.0);
         assert!(sim.factions[0].population >= after_completion);
@@ -3771,7 +5205,10 @@ mod population_tests {
         let source = sim.factions[0].capital_cell;
         let target = sim.factions[1].capital_cell;
         assert!(sim.are_allied(1, 2));
-        assert_eq!(sim.process_attack_command(1, source, target, 0.5), Err("allied_target".to_string()));
+        assert_eq!(
+            sim.process_attack_command(1, source, target, 0.5),
+            Err("allied_target".to_string())
+        );
     }
 
     #[test]
@@ -3780,11 +5217,18 @@ mod population_tests {
         let proposal = sim.offer_alliance(1, PLAYER_FACTION_ID).unwrap();
         assert!(sim.has_pending_alliance(proposal));
         assert!(!sim.are_allied(1, PLAYER_FACTION_ID));
-        assert_eq!(sim.respond_alliance(PLAYER_FACTION_ID, proposal, true).unwrap(), proposal);
+        assert_eq!(
+            sim.respond_alliance(PLAYER_FACTION_ID, proposal, true)
+                .unwrap(),
+            proposal
+        );
         assert!(sim.are_allied(1, PLAYER_FACTION_ID));
 
         let rejected = sim.offer_alliance(2, PLAYER_FACTION_ID).unwrap();
-        assert_eq!(sim.respond_alliance(PLAYER_FACTION_ID, rejected, false), Err("alliance_rejected".to_string()));
+        assert_eq!(
+            sim.respond_alliance(PLAYER_FACTION_ID, rejected, false),
+            Err("alliance_rejected".to_string())
+        );
         assert!(!sim.are_allied(2, PLAYER_FACTION_ID));
     }
 
@@ -3792,8 +5236,18 @@ mod population_tests {
     fn alliance_reward_pool_is_split_by_real_controlled_area() {
         let mut sim = Simulation::new(3);
         sim.offer_alliance(1, 2).unwrap();
-        let area_one = sim.factions.iter().find(|f| f.faction_id == 1).unwrap().controlled_area_km2;
-        let area_two = sim.factions.iter().find(|f| f.faction_id == 2).unwrap().controlled_area_km2;
+        let area_one = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .controlled_area_km2;
+        let area_two = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .controlled_area_km2;
         let shares = sim.alliance_reward_shares(10_000.0);
         let one = shares.iter().find(|(id, _)| *id == 1).unwrap().1;
         let two = shares.iter().find(|(id, _)| *id == 2).unwrap().1;
@@ -3842,25 +5296,46 @@ mod population_tests {
         let after_deploy = sim.factions[0].population;
         sim.cancel_attack(1, order.front_id).unwrap();
         assert!((sim.factions[0].population - after_deploy).abs() < 0.01);
-        assert!(sim.combat_manager.fronts.iter().find(|f| f.front_id == order.front_id).unwrap().survivors_returned);
-        assert_eq!(sim.cancel_attack(1, order.front_id), Err("front_not_active".to_string()));
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == order.front_id)
+            .unwrap();
+        let own_force = if front.faction_a == 1 {
+            front.deployed_population_a
+        } else {
+            front.deployed_population_b
+        };
+        assert!(own_force.abs() < 0.01);
+        assert_eq!(
+            sim.cancel_attack(1, order.front_id),
+            Err("no_deployed_population".to_string())
+        );
         assert!(after_deploy < before);
     }
 
     #[test]
-    fn exhausted_offensive_returns_survivors_and_keeps_casualties_dead() {
+    fn exhausted_side_does_not_refund_and_the_other_side_can_counterpush() {
         let mut sim = Simulation::new(2);
         let (source, target) = make_enemy_pair(&mut sim, 1, 2);
         sim.factions[0].population = sim.factions[0].population_capacity;
         sim.refresh_all_economies();
         let living_before = sim.factions[0].total_living_population;
         let order = sim.process_attack_command(1, source, target, 0.5).unwrap();
-        let index = sim.combat_manager.fronts.iter().position(|front| front.front_id == order.front_id).unwrap();
+        let index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .unwrap();
         sim.combat_manager.fronts[index].deployed_population_a = 10.0;
         sim.step_dt(1.0);
         let front = &sim.combat_manager.fronts[index];
-        assert!(!front.is_combat_active);
-        assert!(front.survivors_returned);
+        assert!(front.is_combat_active);
+        assert!(front.deployed_population_a < 10.0);
+        assert!(front.deployed_population_b > 0.0);
+        assert!(!front.survivors_returned);
         assert!(front.casualties > 0.0);
         assert!(sim.factions[0].total_living_population < living_before);
         assert!(sim.validate_invariants().is_ok());
@@ -3879,28 +5354,14 @@ mod population_tests {
     #[test]
     fn amphibious_operation_is_a_real_population_backed_front() {
         let mut sim = Simulation::new(2);
-        let port = sim
-            .strategic_sites
-            .iter()
-            .find(|site| site.kind == "PORT" && sim.is_coastal_cell(site.cell_a))
-            .map(|site| site.cell_a)
-            .expect("port site");
-        let target = (0..sim.cells.len())
-            .find(|&index| {
-                sim.cells[index].terrain_type == 0
-                    && sim.cells[index].owner_id == 0
-                    && Simulation::cardinal(index)
-                        .into_iter()
-                        .any(|n| sim.cells[n].terrain_type == 2)
-                    && index as u32 != port
-            })
-            .expect("coastal target") as u32;
-        assert!(sim.set_cell_owner(port, 1));
-        assert!(sim.set_cell_owner(target, 2));
-        sim.factions[0].population = sim.factions[0].population_capacity;
+        let (port, target) = canonical_overseas_pair(&mut sim, 1);
         sim.build_port(1, port).unwrap();
         sim.step_dt(10.0);
-        let outcome = sim.process_amphibious_operation(1, port, target, 0.25).unwrap();
+        let population_before = sim.factions[0].population;
+        let playable_before = sim.playable_land_cells;
+        let outcome = sim
+            .process_amphibious_operation(1, port, target, 0.25)
+            .unwrap();
         let front = sim
             .combat_manager
             .fronts
@@ -3910,7 +5371,15 @@ mod population_tests {
         assert_eq!(front.operation_kind, "AMPHIBIOUS");
         assert_eq!(front.source_cell_index, port);
         assert_eq!(front.target_cell_index, target);
-        assert!(front.deployed_population_a > 0.0 || front.deployed_population_b > 0.0);
+        assert_eq!(front.faction_b, 0);
+        let permanently_spent = population_before - sim.factions[0].population;
+        assert!((permanently_spent - population_before * 0.25).abs() < 0.01);
+        assert!((front.deployed_population_a + front.casualties - permanently_spent).abs() < 0.01);
+        assert!(sim.validate_invariants().is_ok());
+        sim.step_dt(0.05);
+        assert_eq!(sim.cells[target as usize].owner_id, 1);
+        assert_eq!(sim.playable_land_mask[target as usize], 1);
+        assert!(sim.playable_land_cells > playable_before);
         assert!(sim.validate_invariants().is_ok());
     }
 
@@ -3961,7 +5430,11 @@ mod population_tests {
 
         assert!(sim.set_cell_owner(port, 2));
         sim.step_dt(0.1);
-        let transferred = sim.port_states().into_iter().find(|state| state.cell_index == port).expect("transferred port");
+        let transferred = sim
+            .port_states()
+            .into_iter()
+            .find(|state| state.cell_index == port)
+            .expect("transferred port");
         assert!(transferred.complete);
         assert_eq!(transferred.owner_id, 2);
         assert_eq!(sim.factions[0].ports_count, 0);
@@ -3970,7 +5443,7 @@ mod population_tests {
     }
 
     #[test]
-    fn amphibious_distance_is_monotonic_and_no_port_limits_real_deployment() {
+    fn amphibious_distance_is_monotonic_and_completed_port_is_mandatory() {
         let a = 200 * WORLD_WIDTH + 200;
         let b = 200 * WORLD_WIDTH + 300;
         let c = 200 * WORLD_WIDTH + 400;
@@ -3979,95 +5452,61 @@ mod population_tests {
         assert!(far > near && near > 0.0);
 
         let mut sim = Simulation::new(2);
-        let port = sim
-            .strategic_sites
-            .iter()
-            .find(|site| site.kind == "PORT" && sim.is_coastal_cell(site.cell_a))
-            .map(|site| site.cell_a)
-            .expect("coastal embarkation site");
-        let target = (0..sim.cells.len())
-            .find(|&index| {
-                sim.cells[index].terrain_type == 0
-                    && sim.cells[index].owner_id == 0
-                    && sim.is_coastal_cell(index as u32)
-                    && index as u32 != port
-            })
-            .expect("coastal target") as u32;
-        assert!(sim.set_cell_owner(port, 1));
-        assert!(sim.set_cell_owner(target, 2));
-        sim.factions[0].population = sim.factions[0].population_capacity;
-        sim.refresh_all_economies();
-        let pool_before = sim.factions[0].population;
-        let outcome = sim.process_amphibious_operation(1, port, target, 1.0).expect("raiding party");
-        let front = sim.combat_manager.fronts.iter().find(|front| front.front_id == outcome.front_id).expect("amphibious front");
-        assert!(front.deployed_population_a <= pool_before * 0.08);
-        assert!(sim.factions[0].population < pool_before);
+        let (port, target) = canonical_overseas_pair(&mut sim, 1);
+        let before = sim.factions[0].population;
+        assert_eq!(
+            sim.process_amphibious_operation(1, port, target, 0.20),
+            Err("completed_port_required".to_string())
+        );
+        assert!((sim.factions[0].population - before).abs() < 0.01);
         assert!(sim.validate_invariants().is_ok());
     }
 
     #[test]
-    fn amphibious_port_changes_commitment_and_survival_while_land_rules_stay_strict() {
-        let configure = |sim: &mut Simulation| -> (u32, u32) {
-            let port = sim
-                .strategic_sites
-                .iter()
-                .find(|site| site.kind == "PORT" && sim.is_coastal_cell(site.cell_a))
-                .map(|site| site.cell_a)
-                .expect("coastal embarkation site");
-            let target = (0..sim.cells.len())
-                .find(|&index| {
-                    sim.cells[index].terrain_type == 0
-                        && sim.cells[index].owner_id == 0
-                        && sim.is_coastal_cell(index as u32)
-                        && index as u32 != port
-                })
-                .expect("coastal target") as u32;
-            assert!(sim.set_cell_owner(port, 1));
-            assert!(sim.set_cell_owner(target, 2));
-            sim.factions[0].population = 100_000.0_f64.min(sim.factions[0].population_capacity);
-            sim.refresh_all_economies();
-            (port, target)
-        };
+    fn amphibious_authority_rejects_hostile_major_and_tiny_targets() {
+        let mut sim = Simulation::new(2);
+        let (port, meaningful_target) = canonical_overseas_pair(&mut sim, 1);
+        sim.build_port(1, port).expect("start port construction");
+        sim.step_dt(10.0);
+        assert!(sim.built_ports.contains(&port));
 
-        let mut without_port = Simulation::new(2);
-        let (port, target) = configure(&mut without_port);
-        let no_port_pool = without_port.factions[0].population;
-        let no_port_order = without_port
-            .process_amphibious_operation(1, port, target, 1.0)
-            .expect("small no-port landing");
-        let no_port_front = without_port
-            .combat_manager
-            .fronts
-            .iter()
-            .find(|front| front.front_id == no_port_order.front_id)
-            .unwrap();
-        assert!(no_port_front.deployed_population_a <= no_port_pool * 0.08 + 0.01);
-        let no_port_committed = no_port_front.deployed_population_a + no_port_front.casualties;
-        let no_port_survival = no_port_front.deployed_population_a / no_port_committed;
+        assert!(sim.set_cell_owner(meaningful_target, 2));
+        assert_eq!(
+            sim.process_amphibious_operation(1, port, meaningful_target, 0.20),
+            Err("hostile_cross_water_not_supported".to_string())
+        );
 
-        let mut with_port = Simulation::new(2);
-        let (port, target) = configure(&mut with_port);
-        let before_port = with_port.factions[0].population;
-        let port_cost = with_port.build_port(1, port).expect("start port construction");
-        assert!(port_cost > 0.0);
-        assert!(with_port.factions[0].population < before_port);
-        with_port.step_dt(10.0);
-        assert!(with_port.built_ports.contains(&port));
-        let with_port_order = with_port
-            .process_amphibious_operation(1, port, target, 1.0)
-            .expect("full port landing");
-        let with_port_front = with_port
-            .combat_manager
-            .fronts
+        let mut geography = Simulation::new_standard(None, 42);
+        let geography_owner = geography.factions[0].faction_id;
+        let geography_port = geography
+            .strategic_sites
             .iter()
-            .find(|front| front.front_id == with_port_order.front_id)
-            .unwrap();
-        let with_port_committed = with_port_front.deployed_population_a + with_port_front.casualties;
-        let with_port_survival = with_port_front.deployed_population_a / with_port_committed;
-        assert!(with_port_front.deployed_population_a > no_port_front.deployed_population_a);
-        assert!(with_port_survival > no_port_survival);
-        assert!(with_port.factions[0].population < before_port - port_cost + 0.01);
-        assert!(with_port.validate_invariants().is_ok());
+            .find(|site| site.kind == "PORT" && geography.is_coastal_cell(site.cell_a))
+            .map(|site| site.cell_a)
+            .expect("standard-world marked port");
+        assert!(geography.set_cell_owner(geography_port, geography_owner));
+        let major = (0..geography.cells.len())
+            .find(|&index| {
+                geography.major_unseeded_land_mask[index] == 1
+                    && geography.is_coastal_cell(index as u32)
+            })
+            .expect("major unseeded coast") as u32;
+        assert_eq!(
+            geography.process_amphibious_operation(geography_owner, geography_port, major, 0.20),
+            Err("major_landmass_not_amphibious_target".to_string())
+        );
+
+        let tiny = (0..geography.cells.len())
+            .find(|&index| {
+                geography.tiny_unsupported_land_mask[index] == 1
+                    && geography.is_coastal_cell(index as u32)
+            })
+            .expect("tiny unsupported coast") as u32;
+        assert_eq!(
+            geography.process_amphibious_operation(geography_owner, geography_port, tiny, 0.20),
+            Err("unsupported_fragment".to_string())
+        );
+        assert!(sim.validate_invariants().is_ok());
 
         let mut strict_land = Simulation::new(2);
         let (source, border) = make_enemy_pair(&mut strict_land, 1, 2);
@@ -4080,7 +5519,13 @@ mod population_tests {
             })
             .expect("non-border hostile land");
         assert_eq!(
-            strict_land.process_attack_command_with_intent(1, source, deep_target as u32, Some(deep_target as u32), 0.5),
+            strict_land.process_attack_command_with_intent(
+                1,
+                source,
+                deep_target as u32,
+                Some(deep_target as u32),
+                0.5
+            ),
             Err("no_shared_front".to_string())
         );
         let inland = (0..strict_land.cells.len())
@@ -4090,7 +5535,6 @@ mod population_tests {
                     && !strict_land.is_coastal_cell(index as u32)
             })
             .expect("inland land");
-        assert!(strict_land.set_cell_owner(inland as u32, 2));
         let coastal_source = strict_land
             .strategic_sites
             .iter()
@@ -4120,10 +5564,12 @@ mod population_tests {
                     }) {
                         continue;
                     }
-                    let clear = (0..28).all(|dy| (0..28).all(|dx| {
-                        let index = (y + dy) * WORLD_WIDTH + x + dx;
-                        sim.cells[index].terrain_type == 0 && sim.cells[index].owner_id == 0
-                    }));
+                    let clear = (0..28).all(|dy| {
+                        (0..28).all(|dx| {
+                            let index = (y + dy) * WORLD_WIDTH + x + dx;
+                            sim.cells[index].terrain_type == 0 && sim.cells[index].owner_id == 0
+                        })
+                    });
                     if clear {
                         base = Some((x, y));
                         break 'search;
@@ -4145,32 +5591,50 @@ mod population_tests {
                         assert!(sim.set_cell_owner(((y + dy) * WORLD_WIDTH + x + dx) as u32, 1));
                     }
                 }
-                (((y + 10) * WORLD_WIDTH + x + 3) as u32, ((y + 10) * WORLD_WIDTH + x + 4) as u32)
+                (
+                    ((y + 10) * WORLD_WIDTH + x + 3) as u32,
+                    ((y + 10) * WORLD_WIDTH + x + 4) as u32,
+                )
             } else if direction_x < 0 {
                 for dy in 4..16 {
                     for dx in 16..19 {
                         assert!(sim.set_cell_owner(((y + dy) * WORLD_WIDTH + x + dx) as u32, 1));
                     }
                 }
-                (((y + 10) * WORLD_WIDTH + x + 16) as u32, ((y + 10) * WORLD_WIDTH + x + 15) as u32)
+                (
+                    ((y + 10) * WORLD_WIDTH + x + 16) as u32,
+                    ((y + 10) * WORLD_WIDTH + x + 15) as u32,
+                )
             } else if direction_y > 0 {
                 for dy in 1..4 {
                     for dx in 4..16 {
                         assert!(sim.set_cell_owner(((y + dy) * WORLD_WIDTH + x + dx) as u32, 1));
                     }
                 }
-                (((y + 3) * WORLD_WIDTH + x + 10) as u32, ((y + 4) * WORLD_WIDTH + x + 10) as u32)
+                (
+                    ((y + 3) * WORLD_WIDTH + x + 10) as u32,
+                    ((y + 4) * WORLD_WIDTH + x + 10) as u32,
+                )
             } else {
                 for dy in 16..19 {
                     for dx in 4..16 {
                         assert!(sim.set_cell_owner(((y + dy) * WORLD_WIDTH + x + dx) as u32, 1));
                     }
                 }
-                (((y + 16) * WORLD_WIDTH + x + 10) as u32, ((y + 15) * WORLD_WIDTH + x + 10) as u32)
+                (
+                    ((y + 16) * WORLD_WIDTH + x + 10) as u32,
+                    ((y + 15) * WORLD_WIDTH + x + 10) as u32,
+                )
             };
 
             let intent_x = if direction_x < 0 { x + 5 } else { x + 14 };
-            let intent_y = if direction_y < 0 { y + 5 } else if direction_y > 0 { y + 14 } else { y + 10 };
+            let intent_y = if direction_y < 0 {
+                y + 5
+            } else if direction_y > 0 {
+                y + 14
+            } else {
+                y + 10
+            };
             let intent = (intent_y * WORLD_WIDTH + intent_x) as u32;
             orders.push((source, target, intent, direction_x, direction_y));
         }
@@ -4179,27 +5643,53 @@ mod population_tests {
         sim.refresh_all_economies();
         let mut front_indices = Vec::new();
         for (source, target, intent, direction_x, direction_y) in orders {
-            let result = sim.process_attack_command_with_intent(1, source, target, Some(intent), 0.05).expect("directional attack");
-            let front_index = sim.combat_manager.fronts.iter().position(|front| front.front_id == result.front_id).expect("front");
-            let next = sim.find_directional_war_frontier_target(front_index, 1, 2, target).expect("local directional candidate");
+            let result = sim
+                .process_attack_command_with_intent(1, source, target, Some(intent), 0.05)
+                .expect("directional attack");
+            let front_index = sim
+                .combat_manager
+                .fronts
+                .iter()
+                .position(|front| front.front_id == result.front_id)
+                .expect("front");
+            let next = sim
+                .find_directional_war_frontier_target(front_index, 1, 2, target)
+                .expect("local directional candidate");
             let source_x = (source as usize % WORLD_WIDTH) as i32;
             let source_y = (source as usize / WORLD_WIDTH) as i32;
             let next_x = (next as usize % WORLD_WIDTH) as i32;
             let next_y = (next as usize / WORLD_WIDTH) as i32;
-            if direction_x > 0 { assert!(next_x >= source_x); }
-            if direction_x < 0 { assert!(next_x <= source_x); }
-            if direction_y > 0 { assert!(next_y >= source_y); }
-            if direction_y < 0 { assert!(next_y <= source_y); }
+            if direction_x > 0 {
+                assert!(next_x >= source_x);
+            }
+            if direction_x < 0 {
+                assert!(next_x <= source_x);
+            }
+            if direction_y > 0 {
+                assert!(next_y >= source_y);
+            }
+            if direction_y < 0 {
+                assert!(next_y <= source_y);
+            }
             assert!((next_x - source_x).abs() <= WAR_THEATRE_RADIUS);
             assert!((next_y - source_y).abs() <= WAR_THEATRE_RADIUS);
             front_indices.push(result.front_id);
         }
         assert_eq!(front_indices.len(), 5);
-        assert_eq!(front_indices.iter().collect::<std::collections::HashSet<_>>().len(), 5);
+        assert_eq!(
+            front_indices
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            5
+        );
         assert!(sim.validate_invariants().is_ok());
     }
 
-    fn prepare_compass_direction_fixture(sim: &mut Simulation, direction: (i32, i32)) -> (u32, u32, u32) {
+    fn prepare_compass_direction_fixture(
+        sim: &mut Simulation,
+        direction: (i32, i32),
+    ) -> (u32, u32, u32) {
         let width = 36usize;
         let height = 36usize;
         // Reuse one loaded world fixture across all compass directions; the
@@ -4227,10 +5717,12 @@ mod population_tests {
         let mut origin = None;
         'search: for y in 72..(WORLD_HEIGHT - height - 72) {
             for x in 72..(WORLD_WIDTH - width - 72) {
-                let clear = (0..height).all(|dy| (0..width).all(|dx| {
-                    let cell = &sim.cells[(y + dy) * WORLD_WIDTH + x + dx];
-                    cell.terrain_type == 0 && cell.owner_id == 0
-                }));
+                let clear = (0..height).all(|dy| {
+                    (0..width).all(|dx| {
+                        let cell = &sim.cells[(y + dy) * WORLD_WIDTH + x + dx];
+                        cell.terrain_type == 0 && cell.owner_id == 0
+                    })
+                });
                 if clear {
                     origin = Some((x, y));
                     break 'search;
@@ -4297,50 +5789,117 @@ mod population_tests {
         let target = target as u32;
         let intent = intent as u32;
         sim.cells[source as usize].owner_id = 1;
-        sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().territory_count = 1;
-        sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().territory_count = width as u32 * height as u32;
-        sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().population = 0.0;
-        sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().total_living_population = 0.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .territory_count = 1;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .territory_count = width as u32 * height as u32;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .population = 0.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .total_living_population = 0.0;
         (source, target, intent)
     }
 
     #[test]
     fn directional_attack_follows_all_eight_compass_intents() {
         let directions = [
-            (-1, 0), (1, 0), (0, -1), (0, 1),
-            (-1, -1), (1, -1), (-1, 1), (1, 1),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
         ];
         let mut sim = Simulation::new(2);
         sim.evaluate_match_outcome = false;
         for direction in directions {
             let (source, target, intent) = prepare_compass_direction_fixture(&mut sim, direction);
-            let attacker_capacity = sim.factions.iter().find(|f| f.faction_id == 1).unwrap().population_capacity;
-            sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().population = attacker_capacity;
-            sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().population = 0.0;
+            let attacker_capacity = sim
+                .factions
+                .iter()
+                .find(|f| f.faction_id == 1)
+                .unwrap()
+                .population_capacity;
+            sim.factions
+                .iter_mut()
+                .find(|f| f.faction_id == 1)
+                .unwrap()
+                .population = attacker_capacity;
+            sim.factions
+                .iter_mut()
+                .find(|f| f.faction_id == 2)
+                .unwrap()
+                .population = 0.0;
             let order = sim
                 .process_attack_command_with_intent(1, source, target, Some(intent), 0.5)
                 .expect("compass attack accepted");
-            let front_index = sim.combat_manager.fronts.iter().position(|front| front.front_id == order.front_id).unwrap();
+            let front_index = sim
+                .combat_manager
+                .fronts
+                .iter()
+                .position(|front| front.front_id == order.front_id)
+                .unwrap();
             let candidate = sim
                 .find_directional_war_frontier_target(front_index, 1, 2, target)
                 .expect("directional candidate");
-            let candidate_patch = generate_compact_patch(&sim.cells, 1, candidate, 4, PatchMode::WarAdvance { defender: 2 });
-            assert!(!candidate_patch.cells.is_empty(), "direction {:?} produced no patch at candidate {} ({:?})", direction, candidate, candidate_patch.blocked_reason);
+            let candidate_patch = generate_compact_patch(
+                &sim.cells,
+                1,
+                candidate,
+                4,
+                PatchMode::WarAdvance { defender: 2 },
+            );
+            assert!(
+                !candidate_patch.cells.is_empty(),
+                "direction {:?} produced no patch at candidate {} ({:?})",
+                direction,
+                candidate,
+                candidate_patch.blocked_reason
+            );
             let source_x = (source as usize % WORLD_WIDTH) as i32;
             let source_y = (source as usize / WORLD_WIDTH) as i32;
             let candidate_x = (candidate as usize % WORLD_WIDTH) as i32;
             let candidate_y = (candidate as usize / WORLD_WIDTH) as i32;
             let displacement = (candidate_x - source_x, candidate_y - source_y);
             let dot = displacement.0 * direction.0 + displacement.1 * direction.1;
-            assert!(dot > 0, "direction {:?} did not advance toward intent: {:?}", direction, displacement);
-            if direction.0 < 0 { assert!(displacement.0 <= 0); }
-            if direction.0 > 0 { assert!(displacement.0 >= 0); }
-            if direction.1 < 0 { assert!(displacement.1 <= 0); }
-            if direction.1 > 0 { assert!(displacement.1 >= 0); }
+            assert!(
+                dot > 0,
+                "direction {:?} did not advance toward intent: {:?}",
+                direction,
+                displacement
+            );
+            if direction.0 < 0 {
+                assert!(displacement.0 <= 0);
+            }
+            if direction.0 > 0 {
+                assert!(displacement.0 >= 0);
+            }
+            if direction.1 < 0 {
+                assert!(displacement.1 <= 0);
+            }
+            if direction.1 > 0 {
+                assert!(displacement.1 >= 0);
+            }
 
             for _ in 0..220 {
                 sim.step_dt(0.05);
-                if sim.combat_manager.fronts[front_index].captured_cells > 0 { break; }
+                if sim.combat_manager.fronts[front_index].captured_cells > 0 {
+                    break;
+                }
             }
             let failed_front = &sim.combat_manager.fronts[front_index];
             assert!(failed_front.captured_cells > 0, "direction {:?} made no authoritative breach: active={} pressure={} target={} term={} pending={}", direction, failed_front.is_combat_active, failed_front.pressure, failed_front.target_cell_index, failed_front.termination_reason, sim.pending_war_advances.len());
@@ -4348,22 +5907,32 @@ mod population_tests {
                 .cells
                 .iter()
                 .enumerate()
-                .filter_map(|(index, cell)| (cell.owner_id == 1 && index != source as usize).then_some((
-                    (index % WORLD_WIDTH) as i32,
-                    (index / WORLD_WIDTH) as i32,
-                )))
+                .filter_map(|(index, cell)| {
+                    (cell.owner_id == 1 && index != source as usize)
+                        .then_some(((index % WORLD_WIDTH) as i32, (index / WORLD_WIDTH) as i32))
+                })
                 .collect();
-            assert!(!captured.is_empty(), "direction {:?} has no authoritative captured cells", direction);
+            assert!(
+                !captured.is_empty(),
+                "direction {:?} has no authoritative captured cells",
+                direction
+            );
             let centroid = (
                 captured.iter().map(|(x, _)| *x as f64).sum::<f64>() / captured.len() as f64,
                 captured.iter().map(|(_, y)| *y as f64).sum::<f64>() / captured.len() as f64,
             );
-            let centroid_displacement = (
-                centroid.0 - source_x as f64,
-                centroid.1 - source_y as f64,
+            let centroid_displacement =
+                (centroid.0 - source_x as f64, centroid.1 - source_y as f64);
+            let centroid_dot = centroid_displacement.0 * direction.0 as f64
+                + centroid_displacement.1 * direction.1 as f64;
+            assert!(
+                centroid_dot > 0.0,
+                "direction {:?} captured centroid {:?} did not move forward from ({},{})",
+                direction,
+                centroid,
+                source_x,
+                source_y
             );
-            let centroid_dot = centroid_displacement.0 * direction.0 as f64 + centroid_displacement.1 * direction.1 as f64;
-            assert!(centroid_dot > 0.0, "direction {:?} captured centroid {:?} did not move forward from ({},{})", direction, centroid, source_x, source_y);
             assert!(sim.validate_invariants().is_ok());
         }
     }
@@ -4376,10 +5945,12 @@ mod population_tests {
         let mut origin = None;
         'search: for y in 80..(WORLD_HEIGHT - depth - 20) {
             for x in 80..(WORLD_WIDTH - width - 20) {
-                let clear = (0..depth).all(|dy| (0..width).all(|dx| {
-                    let index = (y + dy) * WORLD_WIDTH + x + dx;
-                    sim.cells[index].terrain_type == 0 && sim.cells[index].owner_id == 0
-                }));
+                let clear = (0..depth).all(|dy| {
+                    (0..width).all(|dx| {
+                        let index = (y + dy) * WORLD_WIDTH + x + dx;
+                        sim.cells[index].terrain_type == 0 && sim.cells[index].owner_id == 0
+                    })
+                });
                 if clear {
                     origin = Some((x, y));
                     break 'search;
@@ -4394,12 +5965,76 @@ mod population_tests {
             }
         }
         sim.refresh_all_economies();
-        sim.factions.iter_mut().find(|f| f.faction_id == 1).unwrap().population = 140_000.0;
-        sim.factions.iter_mut().find(|f| f.faction_id == 2).unwrap().population = 140_000.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 1)
+            .unwrap()
+            .population = 140_000.0;
+        sim.factions
+            .iter_mut()
+            .find(|f| f.faction_id == 2)
+            .unwrap()
+            .population = 140_000.0;
         let source = (y * WORLD_WIDTH + x + width / 2) as u32;
         let border_target = ((y + 1) * WORLD_WIDTH + x + width / 2) as u32;
         let west_intent = ((y + 4) * WORLD_WIDTH + x + 5) as u32;
         (sim, source, border_target, west_intent)
+    }
+
+    #[test]
+    fn stale_wavefront_reanchors_to_the_same_local_physical_front() {
+        let (mut sim, source, target, intent) = wide_direction_fixture();
+        let order = sim
+            .process_attack_command_with_intent(1, source, target, Some(intent), 0.50)
+            .expect("local offensive");
+        let front_index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .expect("front");
+
+        // Simulate the common stale-target state: the remembered defender
+        // point was already captured, but the same connected local border is
+        // still immediately beyond it.
+        assert!(sim.set_cell_owner(target, 1));
+        let recovered = sim
+            .reanchor_local_war_front(front_index, 1, 2)
+            .expect("same local front must recover a current shared boundary");
+        let front = &sim.combat_manager.fronts[front_index];
+
+        assert_eq!(front.front_id, order.front_id);
+        assert!(front.is_combat_active);
+        assert_ne!(recovered, target);
+        assert_eq!(sim.cells[recovered as usize].owner_id, 2);
+        assert_eq!(sim.cells[front.source_cell_index as usize].owner_id, 1);
+        assert!(Simulation::cardinal(front.source_cell_index as usize)
+            .into_iter()
+            .any(|neighbor| neighbor == recovered as usize));
+    }
+
+    #[test]
+    fn stronger_local_commitment_broadens_a_won_wave_with_diminishing_returns() {
+        let normal = Simulation::local_war_advance_cells("BREAKTHROUGH", 10_000.0);
+        let strong = Simulation::local_war_advance_cells("BREAKTHROUGH", 200_000.0);
+        assert!(
+            strong > normal,
+            "stronger force must create more absolute push"
+        );
+        assert!(
+            (strong as f64 / normal as f64) < 20.0,
+            "war-wave growth must be sublinear in committed population"
+        );
+        assert_eq!(
+            Simulation::local_war_advance_cells("STALLED", 500_000.0),
+            48,
+            "a force amount alone must not create a breakthrough without pressure"
+        );
+        assert!(
+            0.10 / Simulation::local_war_commitment_scale(200_000.0)
+                < 0.10 / Simulation::local_war_commitment_scale(10_000.0),
+            "a larger authorized wave must not be revealed more slowly"
+        );
     }
 
     #[test]
@@ -4408,12 +6043,22 @@ mod population_tests {
         let order = sim
             .process_attack_command_with_intent(1, source, border_target, Some(west_intent), 0.75)
             .expect("directional attack accepted");
-        let front_index = sim.combat_manager.fronts.iter().position(|front| front.front_id == order.front_id).unwrap();
-        assert_eq!(sim.combat_manager.fronts[front_index].intent_target_cell_index, west_intent);
+        let front_index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .unwrap();
+        assert_eq!(
+            sim.combat_manager.fronts[front_index].intent_target_cell_index,
+            west_intent
+        );
 
         for _ in 0..260 {
             sim.step_dt(0.05);
-            if !sim.combat_manager.fronts[front_index].is_combat_active { break; }
+            if !sim.combat_manager.fronts[front_index].is_combat_active {
+                break;
+            }
         }
 
         let anchor_x = (source as usize % WORLD_WIDTH) as f64;
@@ -4429,15 +6074,27 @@ mod population_tests {
         }
         assert!(!captured.is_empty(), "the local front must make progress");
         let centroid_x = captured.iter().map(|(x, _)| *x).sum::<f64>() / captured.len() as f64;
-        assert!(centroid_x < anchor_x - 1.0, "west intent should dominate shared-border crawl: centroid={} anchor={}", centroid_x, anchor_x);
+        assert!(
+            centroid_x < anchor_x - 1.0,
+            "west intent should dominate shared-border crawl: centroid={} anchor={}",
+            centroid_x,
+            anchor_x
+        );
         assert!(sim.validate_invariants().is_ok());
     }
 
     #[test]
     fn attack_without_intent_keeps_legacy_border_point_as_intent() {
         let (mut sim, source, border_target, _) = wide_direction_fixture();
-        let order = sim.process_attack_command(1, source, border_target, 0.25).unwrap();
-        let front = sim.combat_manager.fronts.iter().find(|front| front.front_id == order.front_id).unwrap();
+        let order = sim
+            .process_attack_command(1, source, border_target, 0.25)
+            .unwrap();
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|front| front.front_id == order.front_id)
+            .unwrap();
         assert_eq!(front.intent_target_cell_index, border_target);
     }
 
@@ -4463,9 +6120,23 @@ mod population_tests {
         defender.population = 0.0;
         defender.total_living_population = 0.0;
         let order = sim.process_attack_command(1, source, target, 0.2).unwrap();
-        assert!((sim.factions.iter().find(|f| f.faction_id == 1).unwrap().population - 400_000.0).abs() < 0.01);
+        assert!(
+            (sim.factions
+                .iter()
+                .find(|f| f.faction_id == 1)
+                .unwrap()
+                .population
+                - 400_000.0)
+                .abs()
+                < 0.01
+        );
 
-        let index = sim.combat_manager.fronts.iter().position(|front| front.front_id == order.front_id).unwrap();
+        let index = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .position(|front| front.front_id == order.front_id)
+            .unwrap();
         {
             let front = &mut sim.combat_manager.fronts[index];
             front.deployed_population_a = 70_000.0;
@@ -4474,8 +6145,11 @@ mod population_tests {
         }
         sim.set_cell_owner(target, 1);
         sim.refresh_all_economies();
-        assert!((sim.factions[0].population - 400_000.0).abs() < 0.01, "mop-up must not refund before operation end");
-        assert!((sim.factions[0].total_living_population - 470_000.0).abs() < 0.01);
+        assert!(
+            (sim.factions[0].population - 400_000.0).abs() < 0.01,
+            "mop-up must not refund before operation end"
+        );
+        assert!((sim.factions[0].total_living_population - 400_000.0).abs() < 0.01);
 
         {
             let front = &mut sim.combat_manager.fronts[index];
@@ -4491,15 +6165,18 @@ mod population_tests {
         assert!(sim.combat_manager.fronts[index].survivors_returned);
         let after_return = sim.factions[0].population;
         sim.return_front_survivors(index);
-        assert!((sim.factions[0].population - after_return).abs() < 0.01, "survivors returned twice");
+        assert!(
+            (sim.factions[0].population - after_return).abs() < 0.01,
+            "survivors returned twice"
+        );
         sim.refresh_all_economies();
         assert!(sim.validate_invariants().is_ok());
     }
 
     #[test]
     fn test_task_3_spawn_gate_100_seeds() {
-        use std::collections::HashSet;
         use crate::balance::STANDARD_ACTIVE_CIVILIZATIONS;
+        use std::collections::HashSet;
 
         for seed in 1..=100 {
             let human_choice = match seed % 4 {
@@ -4521,7 +6198,11 @@ mod population_tests {
 
             // 2. Exactly 1 human faction and 43 AI factions
             let human_count = sim.factions.iter().filter(|f| f.is_human).count();
-            assert_eq!(human_count, 1, "Seed {}: must have exactly 1 human faction", seed);
+            assert_eq!(
+                human_count, 1,
+                "Seed {}: must have exactly 1 human faction",
+                seed
+            );
             let human = sim.factions.iter().find(|f| f.is_human).unwrap();
             assert_eq!(human.faction_id, crate::balance::HUMAN_FACTION_ID);
             assert_eq!(human.civilization_id, human_choice.unwrap());
@@ -4569,20 +6250,23 @@ mod population_tests {
             // 5. Each faction has valid starting nucleus (5,000–14,000 km²), contiguous, non-empty
             for f in &sim.factions {
                 assert_eq!(
-                    f.territory_count,
-                    owned_per_faction[f.faction_id as usize],
+                    f.territory_count, owned_per_faction[f.faction_id as usize],
                     "Seed {}: territory count mismatch for faction {}",
                     seed, f.faction_id
                 );
                 assert!(
                     f.territory_count >= 2 && f.territory_count <= 8,
                     "Seed {}: faction {} territory cell count unexpected: {}",
-                    seed, f.faction_id, f.territory_count
+                    seed,
+                    f.faction_id,
+                    f.territory_count
                 );
                 assert!(
                     f.controlled_area_km2 >= 400.0 && f.controlled_area_km2 <= 8_500.0,
                     "Seed {}: faction {} starting area out of bounds: {:.1} km²",
-                    seed, f.faction_id, f.controlled_area_km2
+                    seed,
+                    f.faction_id,
+                    f.controlled_area_km2
                 );
 
                 let cap = f.capital_cell as usize;
@@ -4612,11 +6296,17 @@ mod population_tests {
                     visited_nucleus.len(),
                     f.territory_count as usize,
                     "Seed {}: faction {} territory is not contiguous!",
-                    seed, f.faction_id
+                    seed,
+                    f.faction_id
                 );
             }
 
-            assert!(sim.validate_invariants().is_ok(), "Seed {}: invariant failure: {:?}", seed, sim.validate_invariants());
+            assert!(
+                sim.validate_invariants().is_ok(),
+                "Seed {}: invariant failure: {:?}",
+                seed,
+                sim.validate_invariants()
+            );
         }
     }
 
@@ -4671,8 +6361,15 @@ mod population_tests {
                 let is_contiguous = visited.len() == f.territory_count as usize;
                 lines.push(format!(
                     "{},{},{},{},{},{:.1},{},{},{}",
-                    seed, f.faction_id, f.civilization_id, f.capital_cell,
-                    f.territory_count, f.controlled_area_km2, is_contiguous, water_cells, overlap_cells
+                    seed,
+                    f.faction_id,
+                    f.civilization_id,
+                    f.capital_cell,
+                    f.territory_count,
+                    f.controlled_area_km2,
+                    is_contiguous,
+                    water_cells,
+                    overlap_cells
                 ));
             }
         }
@@ -4684,39 +6381,67 @@ mod population_tests {
     }
 
     #[test]
-    fn test_task_4_population_core_commit_casualty_return_elimination_saturation() {
-        // 1. Commit, casualty, return test
+    fn test_task_4_population_core_permanent_commitment_elimination_saturation() {
+        // 1. A commitment leaves the one strategic pool permanently.
         let mut sim = Simulation::new_standard(Some("roma"), 42);
         assert!(sim.validate_invariants().is_ok());
 
         let human_id = crate::balance::HUMAN_FACTION_ID;
-        let frontier_pt = sim.cells.iter().enumerate().find(|&(i, c)| {
-            c.owner_id == human_id && Simulation::cardinal(i).into_iter().any(|n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id != human_id)
-        }).map(|(i, _)| i as u32).expect("frontier cell");
-        let initial_living = sim.factions.iter().find(|f| f.faction_id == human_id).unwrap().total_living_population;
-        let initial_uncommitted = sim.factions.iter().find(|f| f.faction_id == human_id).unwrap().population;
+        let frontier_pt = sim
+            .cells
+            .iter()
+            .enumerate()
+            .find(|&(i, c)| {
+                c.owner_id == human_id
+                    && Simulation::cardinal(i).into_iter().any(|n| {
+                        sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id != human_id
+                    })
+            })
+            .map(|(i, _)| i as u32)
+            .expect("frontier cell");
+        let initial_living = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == human_id)
+            .unwrap()
+            .total_living_population;
+        let initial_uncommitted = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == human_id)
+            .unwrap()
+            .population;
         assert_eq!(initial_living, initial_uncommitted);
 
         // Commit: Set defense focus
-        let commit_amt = 15_000.0;
-        sim.set_defense_focus(human_id, frontier_pt, commit_amt).unwrap();
+        let commit_amt = 2_500.0;
+        sim.set_defense_focus(human_id, frontier_pt, commit_amt)
+            .unwrap();
         sim.refresh_all_economies();
         assert!(sim.validate_invariants().is_ok());
 
-        let human = sim.factions.iter().find(|f| f.faction_id == human_id).unwrap();
+        let human = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == human_id)
+            .unwrap();
         assert!((human.population - (initial_uncommitted - commit_amt)).abs() < 0.01);
         assert!((human.deployed_population - commit_amt).abs() < 0.01);
-        assert!((human.total_living_population - initial_living).abs() < 0.01);
+        assert!((human.total_living_population - (initial_living - commit_amt)).abs() < 0.01);
 
-        // Return: Release defense focus
+        // Releasing the staging instruction does not refund Population.
         sim.release_defense_focus(human_id, frontier_pt).unwrap();
         sim.refresh_all_economies();
         assert!(sim.validate_invariants().is_ok());
 
-        let human = sim.factions.iter().find(|f| f.faction_id == human_id).unwrap();
-        assert!((human.population - initial_uncommitted).abs() < 0.01);
+        let human = sim
+            .factions
+            .iter()
+            .find(|f| f.faction_id == human_id)
+            .unwrap();
+        assert!((human.population - (initial_uncommitted - commit_amt)).abs() < 0.01);
         assert!((human.deployed_population - 0.0).abs() < 0.01);
-        assert!((human.total_living_population - initial_living).abs() < 0.01);
+        assert!((human.total_living_population - (initial_living - commit_amt)).abs() < 0.01);
 
         // 2. Growth Saturation test (Passive Turtling Prevention)
         let mut sim_growth = Simulation::new(2);
@@ -4743,14 +6468,17 @@ mod population_tests {
         sim_growth.factions[0].effective_controlled_area_km2 = 5_000.0;
         sim_growth.factions[1].controlled_area_km2 = 25_000.0;
         sim_growth.factions[1].effective_controlled_area_km2 = 25_000.0;
-        sim_growth.factions[0].population = 50_000.0;
-        sim_growth.factions[1].population = 50_000.0;
+        sim_growth.factions[0].population = 10_000.0;
+        sim_growth.factions[1].population = 10_000.0;
         sim_growth.recompute_area_stats();
         sim_growth.refresh_all_economies();
 
         let cap_a = sim_growth.factions[0].population_capacity;
         let cap_b = sim_growth.factions[1].population_capacity;
-        assert!(cap_b > cap_a * 1.5, "Faction B with 5x territory must have significantly higher capacity");
+        assert!(
+            cap_b > cap_a * 1.5,
+            "Faction B with 5x territory must have significantly higher capacity"
+        );
 
         // Simulate 200 seconds of growth
         for _ in 0..200 {
@@ -4762,7 +6490,10 @@ mod population_tests {
         let pop_b = sim_growth.factions[1].total_living_population;
 
         assert!(pop_a <= cap_a + 1.0);
-        assert!(pop_b > pop_a, "Larger territory faction must outgrow turtle faction");
+        assert!(
+            pop_b > pop_a,
+            "Larger territory faction must outgrow turtle faction"
+        );
 
         // 3. Elimination test
         for i in 0..5 {
@@ -4790,9 +6521,18 @@ mod population_tests {
             if step % 50 == 0 {
                 let fac_idx = rng.gen_range(0..sim_rand.factions.len());
                 let fac_id = sim_rand.factions[fac_idx].faction_id;
-                let frontier_opt = sim_rand.cells.iter().enumerate().find(|&(i, c)| {
-                    c.owner_id == fac_id && Simulation::cardinal(i).into_iter().any(|n| sim_rand.cells[n].terrain_type == 0 && sim_rand.cells[n].owner_id != fac_id)
-                }).map(|(i, _)| i as u32);
+                let frontier_opt = sim_rand
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .find(|&(i, c)| {
+                        c.owner_id == fac_id
+                            && Simulation::cardinal(i).into_iter().any(|n| {
+                                sim_rand.cells[n].terrain_type == 0
+                                    && sim_rand.cells[n].owner_id != fac_id
+                            })
+                    })
+                    .map(|(i, _)| i as u32);
                 let avail = sim_rand.factions[fac_idx].population;
                 if let Some(frontier_cell) = frontier_opt {
                     if avail > 5_000.0 {
@@ -4865,18 +6605,39 @@ mod population_tests {
         assert!((fac_a.consolidation_ratio - 1.0).abs() < 0.01);
         assert!((fac_a.overextension_ratio - 0.0).abs() < 0.01);
 
-        assert!((fac_b.consolidation_ratio - crate::balance::CONSOLIDATION_NEUTRAL_INITIAL).abs() < 0.01);
-        assert!((fac_b.overextension_ratio - (1.0 - crate::balance::CONSOLIDATION_NEUTRAL_INITIAL)).abs() < 0.01);
+        assert!(
+            (fac_b.consolidation_ratio - crate::balance::CONSOLIDATION_NEUTRAL_INITIAL).abs()
+                < 0.01
+        );
+        assert!(
+            (fac_b.overextension_ratio - (1.0 - crate::balance::CONSOLIDATION_NEUTRAL_INITIAL))
+                .abs()
+                < 0.01
+        );
 
         assert!(fac_a.effective_controlled_area_km2 > fac_b.effective_controlled_area_km2 * 4.0);
         assert!(fac_a.population_capacity > fac_b.population_capacity);
 
-        let order_a = sim.process_attack_command(3, base_att as u32, base_a as u32, 0.2).unwrap();
-        let front_a = sim.combat_manager.fronts.iter().find(|f| f.front_id == order_a.front_id).unwrap();
+        let order_a = sim
+            .process_attack_command(3, base_att as u32, base_a as u32, 0.2)
+            .unwrap();
+        let front_a = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == order_a.front_id)
+            .unwrap();
         let defense_mobilized_a = front_a.local_defense_population;
 
-        let order_b = sim.process_attack_command(3, base_att2 as u32, base_b as u32, 0.2).unwrap();
-        let front_b = sim.combat_manager.fronts.iter().find(|f| f.front_id == order_b.front_id).unwrap();
+        let order_b = sim
+            .process_attack_command(3, base_att2 as u32, base_b as u32, 0.2)
+            .unwrap();
+        let front_b = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == order_b.front_id)
+            .unwrap();
         let defense_mobilized_b = front_b.local_defense_population;
 
         assert!(
@@ -4889,7 +6650,10 @@ mod population_tests {
         let initial_ratio = sim.factions[1].consolidation_ratio;
         sim.advance_area_consolidation(50.0);
         let matured_ratio = sim.factions[1].consolidation_ratio;
-        assert!(matured_ratio > initial_ratio, "Territory must consolidate over time");
+        assert!(
+            matured_ratio > initial_ratio,
+            "Territory must consolidate over time"
+        );
         assert!(sim.factions[1].overextension_ratio < 1.0 - initial_ratio);
     }
 
@@ -4917,7 +6681,9 @@ mod population_tests {
             }
             sim.factions[0].capital_cell = center_idx as u32;
             sim.factions[0].population = 100_000.0;
-            for c in &mut sim.cell_consolidation { *c = 1.0; }
+            for c in &mut sim.cell_consolidation {
+                *c = 1.0;
+            }
             sim.recompute_area_stats();
             sim.refresh_all_economies();
             sim
@@ -4945,7 +6711,9 @@ mod population_tests {
             }
             s.factions[0].capital_cell = center_idx as u32;
             s.factions[0].population = 100_000.0;
-            for c in &mut s.cell_consolidation { *c = 1.0; }
+            for c in &mut s.cell_consolidation {
+                *c = 1.0;
+            }
             s.recompute_area_stats();
             s.refresh_all_economies();
         };
@@ -4954,7 +6722,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_west = (256 * WORLD_WIDTH + (512 - 25)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_west, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_west, "FOCUS", None)
                 .expect("Focus west expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -4962,9 +6731,17 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // East side must NOT advance at all (x > 512)
-                assert!(x <= 512, "East side must not advance when expanding west! Got x={}", x);
+                assert!(
+                    x <= 512,
+                    "East side must not advance when expanding west! Got x={}",
+                    x
+                );
                 // Corridor must be bounded in Y (near 256)
-                assert!((y - 256).abs() <= 10, "Corridor Y spread must remain localized! Got y={}", y);
+                assert!(
+                    (y - 256).abs() <= 10,
+                    "Corridor Y spread must remain localized! Got y={}",
+                    y
+                );
             }
         }
 
@@ -4972,7 +6749,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_north = ((256 - 25) * WORLD_WIDTH + 512) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_north, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_north, "FOCUS", None)
                 .expect("Focus north expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -4980,9 +6758,17 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // South side must NOT advance at all (y > 256)
-                assert!(y <= 256, "South side must not advance when expanding north! Got y={}", y);
+                assert!(
+                    y <= 256,
+                    "South side must not advance when expanding north! Got y={}",
+                    y
+                );
                 // Corridor must be bounded in X (near 512)
-                assert!((x - 512).abs() <= 10, "Corridor X spread must remain localized! Got x={}", x);
+                assert!(
+                    (x - 512).abs() <= 10,
+                    "Corridor X spread must remain localized! Got x={}",
+                    x
+                );
             }
         }
 
@@ -4990,7 +6776,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_nw = ((256 - 22) * WORLD_WIDTH + (512 - 22)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_nw, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_nw, "FOCUS", None)
                 .expect("Focus northwest expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -4998,7 +6785,12 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // Southeast must NOT advance (x > 512 || y > 256)
-                assert!(x <= 512 && y <= 256, "Southeast must not advance when expanding northwest! Got x={}, y={}", x, y);
+                assert!(
+                    x <= 512 && y <= 256,
+                    "Southeast must not advance when expanding northwest! Got x={}, y={}",
+                    x,
+                    y
+                );
             }
         }
 
@@ -5006,7 +6798,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_east = (256 * WORLD_WIDTH + (512 + 25)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_east, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_east, "FOCUS", None)
                 .expect("Focus east expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -5014,8 +6807,16 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // West side must NOT advance at all (x < 512)
-                assert!(x >= 512, "West side must not advance when expanding east! Got x={}", x);
-                assert!((y - 256).abs() <= 10, "Corridor Y spread must remain localized! Got y={}", y);
+                assert!(
+                    x >= 512,
+                    "West side must not advance when expanding east! Got x={}",
+                    x
+                );
+                assert!(
+                    (y - 256).abs() <= 10,
+                    "Corridor Y spread must remain localized! Got y={}",
+                    y
+                );
             }
         }
 
@@ -5023,7 +6824,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_south = ((256 + 25) * WORLD_WIDTH + 512) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_south, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_south, "FOCUS", None)
                 .expect("Focus south expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -5031,8 +6833,16 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // North side must NOT advance at all (y < 256)
-                assert!(y >= 256, "North side must not advance when expanding south! Got y={}", y);
-                assert!((x - 512).abs() <= 10, "Corridor X spread must remain localized! Got x={}", x);
+                assert!(
+                    y >= 256,
+                    "North side must not advance when expanding south! Got y={}",
+                    y
+                );
+                assert!(
+                    (x - 512).abs() <= 10,
+                    "Corridor X spread must remain localized! Got x={}",
+                    x
+                );
             }
         }
 
@@ -5040,7 +6850,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_se = ((256 + 22) * WORLD_WIDTH + (512 + 22)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_se, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_se, "FOCUS", None)
                 .expect("Focus southeast expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -5048,7 +6859,12 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // Northwest must NOT advance (x < 512 || y < 256)
-                assert!(x >= 512 && y >= 256, "Northwest must not advance when expanding southeast! Got x={}, y={}", x, y);
+                assert!(
+                    x >= 512 && y >= 256,
+                    "Northwest must not advance when expanding southeast! Got x={}, y={}",
+                    x,
+                    y
+                );
             }
         }
 
@@ -5056,7 +6872,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_ne = ((256 - 22) * WORLD_WIDTH + (512 + 22)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_ne, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_ne, "FOCUS", None)
                 .expect("Focus northeast expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -5064,7 +6881,12 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // Southwest must NOT advance (x < 512 || y > 256)
-                assert!(x >= 512 && y <= 256, "Southwest must not advance when expanding northeast! Got x={}, y={}", x, y);
+                assert!(
+                    x >= 512 && y <= 256,
+                    "Southwest must not advance when expanding northeast! Got x={}, y={}",
+                    x,
+                    y
+                );
             }
         }
 
@@ -5072,7 +6894,8 @@ mod population_tests {
         {
             reset_circle(&mut sim);
             let target_sw = ((256 + 22) * WORLD_WIDTH + (512 - 22)) as u32;
-            let outcome = sim.process_expand_command_with_mode(1, target_sw, "FOCUS", None)
+            let outcome = sim
+                .process_expand_command_with_mode(1, target_sw, "FOCUS", None)
                 .expect("Focus southwest expansion should succeed");
             assert!(outcome.patch.actual_size >= 4);
 
@@ -5080,7 +6903,12 @@ mod population_tests {
                 let x = (cell_idx as usize % WORLD_WIDTH) as i32;
                 let y = (cell_idx as usize / WORLD_WIDTH) as i32;
                 // Northeast must NOT advance (x > 512 || y < 256)
-                assert!(x <= 512 && y >= 256, "Northeast must not advance when expanding southwest! Got x={}, y={}", x, y);
+                assert!(
+                    x <= 512 && y >= 256,
+                    "Northeast must not advance when expanding southwest! Got x={}, y={}",
+                    x,
+                    y
+                );
             }
         }
 
@@ -5089,15 +6917,26 @@ mod population_tests {
             reset_circle(&mut sim);
             for _ in 0..4 {
                 sim.factions[0].population = 100_000.0;
-                let outcome = sim.process_expand_command_with_mode(1, 0, "FRONTIER", None)
+                let outcome = sim
+                    .process_expand_command_with_mode(1, 0, "FRONTIER", None)
                     .expect("Frontier expansion should succeed");
                 assert!(outcome.patch.actual_size >= 4);
             }
 
             let metrics = crate::expansion::measure_shape_quality(&sim.cells, 1);
-            assert_eq!(metrics.single_cell_tendrils, 0, "No single-cell tendrils or spikes allowed in natural growth!");
-            assert_eq!(metrics.internal_neutral_holes, 0, "No trapped internal neutral holes allowed!");
-            assert!(metrics.perimeter_to_area_ratio < 1.0, "Shape must remain compact and rounded (perimeter/area ratio: {:.3})", metrics.perimeter_to_area_ratio);
+            assert_eq!(
+                metrics.single_cell_tendrils, 0,
+                "No single-cell tendrils or spikes allowed in natural growth!"
+            );
+            assert_eq!(
+                metrics.internal_neutral_holes, 0,
+                "No trapped internal neutral holes allowed!"
+            );
+            assert!(
+                metrics.perimeter_to_area_ratio < 1.0,
+                "Shape must remain compact and rounded (perimeter/area ratio: {:.3})",
+                metrics.perimeter_to_area_ratio
+            );
         }
     }
 
@@ -5116,31 +6955,15 @@ mod population_tests {
             fac.territory_count += 1;
         }
 
-        // 1. Attack during ExpansionEra must be rejected with "war_not_available"
-        let err_expansion = sim.process_attack_command(1, s, enemy_cell, 0.5);
-        assert_eq!(err_expansion, Err("war_not_available".to_string()));
-
-        // 2. Fill neutral territory to trigger FinalFrontier
-        for cell in &mut sim.cells {
-            if cell.terrain_type == 0 && cell.owner_id == 0 {
-                cell.owner_id = 3;
-            }
-        }
-        sim.step_dt(1.0);
-        assert_eq!(sim.macro_phase, MacroPhase::FinalFrontier);
-        assert!(sim.macro_phase_timer > 0.0);
-
-        // 3. Attack during armistice must STILL be rejected
-        let err_armistice = sim.process_attack_command(1, s, enemy_cell, 0.5);
-        assert_eq!(err_armistice, Err("war_not_available".to_string()));
-
-        // 4. Advance through armistice to WarEra
-        sim.step_dt(crate::balance::FINAL_FRONTIER_ARMISTICE_SECONDS as f64 + 1.0);
-        assert_eq!(sim.macro_phase, MacroPhase::WarEra);
-
-        // 5. Attack during WarEra must be ACCEPTED
-        let ok_war = sim.process_attack_command(1, s, enemy_cell, 0.5);
-        assert!(ok_war.is_ok(), "War attack must succeed during WarEra! Got: {:?}", ok_war);
+        // A legal local contact starts immediately for both AI and human,
+        // without globally closing every other civilization's frontier.
+        let local_war = sim.process_attack_command(1, s, enemy_cell, 0.20);
+        assert!(
+            local_war.is_ok(),
+            "local contact should start war: {:?}",
+            local_war
+        );
+        assert_eq!(sim.macro_phase, MacroPhase::ExpansionEra);
     }
 
     #[test]
@@ -5180,17 +7003,27 @@ mod population_tests {
         let source_cell = (attack_y * WORLD_WIDTH + 499) as u32;
         let target_cell = (attack_y * WORLD_WIDTH + 500) as u32;
         let deep_target = (attack_y * WORLD_WIDTH + 508) as u32;
-        let order = sim.process_attack_command_with_intent(1, source_cell, target_cell, Some(deep_target), 0.20)
+        let order = sim
+            .process_attack_command_with_intent(
+                1,
+                source_cell,
+                target_cell,
+                Some(deep_target),
+                0.20,
+            )
             .expect("Attack should launch successfully");
 
         // 2. Reinforcement consumes real uncommitted Population
         let uncommitted_before = sim.factions[0].population;
-        let reinforced_amount = sim.reinforce_front(1, order.front_id, 0.25)
+        let reinforced_amount = sim
+            .reinforce_front(1, order.front_id, 0.25)
             .expect("Reinforcement must succeed");
         assert!(reinforced_amount > 0.0);
         let uncommitted_after = sim.factions[0].population;
-        assert!((uncommitted_before - uncommitted_after - reinforced_amount).abs() < 0.01,
-            "Reinforcement must consume exact real uncommitted Population!");
+        assert!(
+            (uncommitted_before - uncommitted_after - reinforced_amount).abs() < 0.01,
+            "Reinforcement must consume exact real uncommitted Population!"
+        );
 
         let north_border_enemy = (200 * WORLD_WIDTH + 500) as usize;
         let south_border_enemy = (209 * WORLD_WIDTH + 500) as usize;
@@ -5201,8 +7034,14 @@ mod population_tests {
             sim.step_dt(0.2);
         }
 
-        assert_eq!(sim.cells[north_border_enemy].owner_id, 2, "North border cell must remain unchanged by local attack!");
-        assert_eq!(sim.cells[south_border_enemy].owner_id, 2, "South border cell must remain unchanged by local attack!");
+        assert_eq!(
+            sim.cells[north_border_enemy].owner_id, 2,
+            "North border cell must remain unchanged by local attack!"
+        );
+        assert_eq!(
+            sim.cells[south_border_enemy].owner_id, 2,
+            "South border cell must remain unchanged by local attack!"
+        );
 
         // 3. Frontage gate: 100% force on 1-cell front does NOT create linear 100x power
         let cap_power = crate::combat::calculate_effective_combat_power(
@@ -5228,25 +7067,48 @@ mod population_tests {
             power_ratio
         );
 
-        // 4. Cancel / withdrawal returns survivors
+        // 4. Withdrawal removes this side's pressure without refunding its
+        // commitment; the opponent's local pressure remains on the front.
+        let population_before_cancel = sim.factions[0].population;
         let cancel_res = sim.cancel_attack(1, order.front_id);
         if cancel_res.is_ok() {
-            let front = sim.combat_manager.fronts.iter().find(|f| f.front_id == order.front_id).unwrap();
-            assert!(!front.is_combat_active);
-            assert!(front.survivors_returned);
+            let front = sim
+                .combat_manager
+                .fronts
+                .iter()
+                .find(|f| f.front_id == order.front_id)
+                .unwrap();
+            let own_force = if front.faction_a == 1 {
+                front.deployed_population_a
+            } else {
+                front.deployed_population_b
+            };
+            assert!(own_force.abs() < 0.01);
+            assert!((sim.factions[0].population - population_before_cancel).abs() < 0.01);
         } else {
-            let order2 = sim.process_attack_command_with_intent(
-                1,
-                (202 * WORLD_WIDTH + 499) as u32,
-                (202 * WORLD_WIDTH + 500) as u32,
-                None,
-                0.10,
-            ).expect("Second attack should launch");
+            let order2 = sim
+                .process_attack_command_with_intent(
+                    1,
+                    (202 * WORLD_WIDTH + 499) as u32,
+                    (202 * WORLD_WIDTH + 500) as u32,
+                    None,
+                    0.10,
+                )
+                .expect("Second attack should launch");
             let cancel2 = sim.cancel_attack(1, order2.front_id);
             assert!(cancel2.is_ok());
-            let front2 = sim.combat_manager.fronts.iter().find(|f| f.front_id == order2.front_id).unwrap();
-            assert!(!front2.is_combat_active);
-            assert!(front2.survivors_returned);
+            let front2 = sim
+                .combat_manager
+                .fronts
+                .iter()
+                .find(|f| f.front_id == order2.front_id)
+                .unwrap();
+            let own_force = if front2.faction_a == 1 {
+                front2.deployed_population_a
+            } else {
+                front2.deployed_population_b
+            };
+            assert!(own_force.abs() < 0.01);
         }
     }
 
@@ -5273,7 +7135,10 @@ mod population_tests {
 
         let pocket_cell = (y * WORLD_WIDTH + 410) as u32;
         sim.refresh_supply_connectivity();
-        assert!(sim.is_cell_land_connected_to_capital(1, pocket_cell), "Pocket should be supplied when corridor is intact");
+        assert!(
+            sim.is_cell_land_connected_to_capital(1, pocket_cell),
+            "Pocket should be supplied when corridor is intact"
+        );
 
         // 1. Cut the corridor in the middle (x=405) with enemy land
         let cut_cell = (y * WORLD_WIDTH + 405) as u32;
@@ -5281,7 +7146,10 @@ mod population_tests {
         sim.refresh_supply_connectivity();
 
         // 2. Cut corridor -> isolated front recognized
-        assert!(!sim.is_cell_land_connected_to_capital(1, pocket_cell), "Cut corridor must isolate pocket!");
+        assert!(
+            !sim.is_cell_land_connected_to_capital(1, pocket_cell),
+            "Cut corridor must isolate pocket!"
+        );
 
         let enemy_adjacent = (y * WORLD_WIDTH + 411) as u32;
         sim.cells[enemy_adjacent as usize].owner_id = 2;
@@ -5292,24 +7160,59 @@ mod population_tests {
         sim.refresh_all_economies();
 
         let cm_id = sim.combat_manager.register_attack_operation_with_intent(
-            1, 2, pocket_cell, enemy_adjacent, enemy_adjacent,
-            0.0, 0.0, 1.0, 0.0, 1000.0, 1000.0, 0.0, sim.tick, "LAND_OFFENSIVE"
+            1,
+            2,
+            pocket_cell,
+            enemy_adjacent,
+            enemy_adjacent,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1000.0,
+            1000.0,
+            0.0,
+            sim.tick,
+            "LAND_OFFENSIVE",
         );
         let reinforce_err = sim.reinforce_front(1, cm_id, 0.2);
-        assert_eq!(reinforce_err, Err("pocket_isolated".to_string()), "Reinforcing isolated front must fail!");
+        assert_eq!(
+            reinforce_err,
+            Err("pocket_isolated".to_string()),
+            "Reinforcing isolated front must fail!"
+        );
 
         // 3. Isolated pocket degrades cohesion gradually but does NOT instantly delete
-        let front = sim.combat_manager.fronts.iter_mut().find(|f| f.front_id == cm_id).unwrap();
+        let front = sim
+            .combat_manager
+            .fronts
+            .iter_mut()
+            .find(|f| f.front_id == cm_id)
+            .unwrap();
         let initial_cohesion = front.cohesion;
         sim.step_dt(1.0);
-        let front_after = sim.combat_manager.fronts.iter().find(|f| f.front_id == cm_id).unwrap();
-        assert!(front_after.cohesion < initial_cohesion, "Cohesion must degrade when unsupplied!");
-        assert!(front_after.is_combat_active, "Pocket must survive initially without instant deletion!");
+        let front_after = sim
+            .combat_manager
+            .fronts
+            .iter()
+            .find(|f| f.front_id == cm_id)
+            .unwrap();
+        assert!(
+            front_after.cohesion < initial_cohesion,
+            "Cohesion must degrade when unsupplied!"
+        );
+        assert!(
+            front_after.is_combat_active,
+            "Pocket must survive initially without instant deletion!"
+        );
 
         // 4. Restore the corridor -> supply restores
         sim.cells[cut_cell as usize].owner_id = 1;
         sim.refresh_supply_connectivity();
-        assert!(sim.is_cell_land_connected_to_capital(1, pocket_cell), "Restoring corridor must restore supply!");
+        assert!(
+            sim.is_cell_land_connected_to_capital(1, pocket_cell),
+            "Restoring corridor must restore supply!"
+        );
 
         // 5. Cross-water without port has NO false connectivity
         let water_cell = ((y + 1) * WORLD_WIDTH + 400) as usize;
@@ -5317,7 +7220,10 @@ mod population_tests {
         let island_cell = ((y + 2) * WORLD_WIDTH + 400) as usize;
         sim.cells[island_cell].terrain_type = 0;
         sim.cells[island_cell].owner_id = 1;
-        assert!(!sim.is_cell_land_connected_to_capital(1, island_cell as u32), "No false cross-water connectivity!");
+        assert!(
+            !sim.is_cell_land_connected_to_capital(1, island_cell as u32),
+            "No false cross-water connectivity!"
+        );
     }
 
     #[test]
@@ -5326,31 +7232,63 @@ mod population_tests {
         sim.macro_phase = MacroPhase::WarEra;
 
         let cap = sim.factions[0].capital_cell;
-        let other_cell = sim.cells.iter().enumerate().position(|(idx, c)| c.owner_id == 1 && idx as u32 != cap).unwrap() as u32;
+        let other_cell = sim
+            .cells
+            .iter()
+            .enumerate()
+            .position(|(idx, c)| c.owner_id == 1 && idx as u32 != cap)
+            .unwrap() as u32;
         sim.refresh_all_economies();
 
         // 1. Capture capital triggers relocation
         assert!(sim.set_cell_owner(cap, 2));
-        assert!(sim.relocation_states.contains_key(&1), "Relocation state must be initiated");
+        assert!(
+            sim.relocation_states.contains_key(&1),
+            "Relocation state must be initiated"
+        );
         let reloc = sim.relocation_states.get(&1).unwrap();
-        assert!((reloc.time_remaining - 10.0).abs() < 0.1, "Relocation timer must start at ~10s");
+        assert!(
+            (reloc.time_remaining - 10.0).abs() < 0.1,
+            "Relocation timer must start at ~10s"
+        );
 
         // 2. Growth impact during relocation: growth stops
         sim.refresh_all_economies();
-        assert_eq!(sim.factions[0].population_growth_per_second, 0.0, "Growth must pause during relocation");
+        assert_eq!(
+            sim.factions[0].population_growth_per_second, 0.0,
+            "Growth must pause during relocation"
+        );
 
         // 3. Recapture original capital before timer expires cancels relocation
         assert!(sim.set_cell_owner(cap, 1));
-        assert!(!sim.relocation_states.contains_key(&1), "Recapturing capital must cancel relocation");
-        assert_eq!(sim.factions[0].capital_cell, cap, "Original capital must be restored");
+        assert!(
+            !sim.relocation_states.contains_key(&1),
+            "Recapturing capital must cancel relocation"
+        );
+        assert_eq!(
+            sim.factions[0].capital_cell, cap,
+            "Original capital must be restored"
+        );
 
         // 4. Capture again and advance timer through 10.5 seconds
         assert!(sim.set_cell_owner(cap, 2));
         sim.step_dt(10.5);
-        assert!(!sim.relocation_states.contains_key(&1), "Relocation should be complete");
-        assert_ne!(sim.factions[0].capital_cell, cap, "Provisional capital must be established");
-        assert_eq!(sim.cells[sim.factions[0].capital_cell as usize].owner_id, 1, "Provisional capital must be an owned cell");
-        assert!(!sim.factions[0].is_eliminated, "Faction must remain alive with provisional capital");
+        assert!(
+            !sim.relocation_states.contains_key(&1),
+            "Relocation should be complete"
+        );
+        assert_ne!(
+            sim.factions[0].capital_cell, cap,
+            "Provisional capital must be established"
+        );
+        assert_eq!(
+            sim.cells[sim.factions[0].capital_cell as usize].owner_id, 1,
+            "Provisional capital must be an owned cell"
+        );
+        assert!(
+            !sim.factions[0].is_eliminated,
+            "Faction must remain alive with provisional capital"
+        );
     }
 
     #[test]
@@ -5378,9 +7316,14 @@ mod population_tests {
             let mut expected = std::collections::HashSet::new();
             for (idx, cell) in sim.cells.iter().enumerate() {
                 if cell.owner_id == fac {
-                    let has_other_neighbor = Simulation::cardinal(idx)
-                        .into_iter()
-                        .any(|n| sim.cells[n].terrain_type == 0 && sim.cells[n].owner_id != fac);
+                    // The frontier cache deliberately includes approved
+                    // topology-only micro-gap links for neutral expansion.
+                    // Keep this oracle on that same legal traversal graph;
+                    // hostile targeting remains physically cardinal elsewhere.
+                    let has_other_neighbor =
+                        crate::expansion::legal_land_neighbors(&sim.cells, idx)
+                            .into_iter()
+                            .any(|n| sim.cells[n].owner_id != fac);
                     if has_other_neighbor {
                         expected.insert(idx as u32);
                     }
